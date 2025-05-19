@@ -45,6 +45,7 @@
       <button id="buildBtn" class="btn btn-primary">Build Workspace</button>
       <button id="createPackageBtn" class="btn btn-success">Create Package</button>
       <button id="createNodeBtn" class="btn btn-secondary">Create Node</button>
+      <button id="setupWorkspaceBtn" class="btn btn-outline-primary">Setup Workspace</button>
       <button id="stopAllBtn" class="btn btn-danger ms-auto">Stop All Nodes</button>
     </div>
     <div id="packagesContainer"></div>
@@ -134,6 +135,12 @@
         location.reload();
       });
     };
+    document.getElementById('setupWorkspaceBtn').onclick = () => {
+      fetch('/api/setup_workspace', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => alert(`Setup status: ${data.status}`));
+    };
+
 
     socket.on('status_update', (data) => {
       container.innerHTML = '';
@@ -222,6 +229,16 @@
           item.appendChild(status);
           item.appendChild(controls);
           body.appendChild(item);
+          const logBox = document.createElement('pre');
+          logBox.className = 'border rounded bg-dark text-light p-2 mt-2';
+          logBox.style.maxHeight = '200px';
+          logBox.style.overflowY = 'auto';
+          logBox.id = `log-${pkg.name}-${node.name}`;
+
+          body.appendChild(logBox);
+
+          socket.emit('subscribe_logs', { package: pkg.name, node: node.name });
+
         });
 
         card.appendChild(header);
@@ -229,6 +246,15 @@
         container.appendChild(card);
       });
     });
+
+    socket.on('node_log', (data) => {
+  const logBox = document.getElementById(`log-${data.package}-${data.node}`);
+  if (logBox) {
+    logBox.textContent += data.line;
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+});
+
   </script>
 </body>
 </html>

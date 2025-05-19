@@ -16,6 +16,35 @@ socketio = SocketIO(app, async_mode='threading')
 ros_env = os.environ.copy()
 status_lock = Lock()
 
+
+@app.route('/api/setup_workspace', methods=['POST'])
+def setup_workspace():
+    try:
+        subprocess.run(['colcon', 'build'], cwd=os.getenv('ROS_WORKSPACE', '~/spot_micro_ws'), check=True)
+        return jsonify({'status': 'success'}), 200
+    except subprocess.CalledProcessError as e:
+        return jsonify({'status': 'error', 'details': str(e)}), 500
+
+@socketio.on('subscribe_logs')
+def handle_subscribe_logs(data):
+    pkg, node = data['package'], data['node']
+    log_path = f"{os.getenv('ROS_WORKSPACE', '~/spot_micro_ws')}/log/latest_build/{pkg}/log/latest_build/{node}.log"
+    
+    def stream_logs():
+        try:
+            with open(log_path, 'r') as f:
+                f.seek(0, os.SEEK_END)
+                while True:
+                    line = f.readline()
+                    if not line:
+                        socketio.sleep(0.5)
+                        continue
+                    socketio.emit('node_log', {'package': pkg, 'node': node, 'line': line})
+        except Exception as e:
+            socketio.emit('node_log', {'package': pkg, 'node': node, 'line': f"Error: {str(e)}"})
+
+    socketio.start_background_task(stream_logs)
+
 @app.route('/')
 def index():
     return render_template('index.html')
