@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ROS2 Web Manager</title>
+  <script src="https://cdn.socket.io/4.4.1/socket.io.min.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+  <style>
+    body { padding: 20px; background-color: #f5f5f5; }
+    .package-card { margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+    .node-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+      border-bottom: 1px solid #ddd;
+      gap: 1rem;
+    }
+    .node-name { flex: 1; font-weight: 500; }
+    .node-status {
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 0.75rem;
+    }
+    .running { background-color: #d4edda; color: #155724; }
+    .stopped { background-color: #f8d7da; color: #721c24; }
+    .external { background-color: #d1ecf1; color: #0c5460; }
+    .node-controls {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .node-type, .node-lifecycle {
+      font-size: 0.7rem;
+      color: #6c757d;
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1 class="mb-4">ROS2 Web Manager</h1>
+    <div class="mb-3 d-flex gap-2">
+      <button id="buildBtn" class="btn btn-primary">Build Workspace</button>
+      <button id="createPackageBtn" class="btn btn-success">Create Package</button>
+      <button id="createNodeBtn" class="btn btn-secondary">Create Node</button>
+      <button id="stopAllBtn" class="btn btn-danger ms-auto">Stop All Nodes</button>
+    </div>
+    <div id="packagesContainer"></div>
+  </div>
+
+  <!-- Create Package Modal -->
+  <div class="modal fade" id="packageModal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">Create Package</h5></div>
+        <div class="modal-body">
+          <input type="text" class="form-control mb-2" id="pkgName" placeholder="Package name">
+          <input type="text" class="form-control" id="pkgDeps" placeholder="Dependencies (comma-separated)">
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" id="submitPackage">Create</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create Node Modal -->
+  <div class="modal fade" id="nodeModal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">Create Node</h5></div>
+        <div class="modal-body">
+          <input type="text" class="form-control mb-2" id="nodePkg" placeholder="Package name">
+          <input type="text" class="form-control mb-2" id="nodeName" placeholder="Node name">
+          <select class="form-select" id="nodeType">
+            <option value="generic" selected>Generic</option>
+            <option value="publisher">Publisher</option>
+            <option value="subscriber">Subscriber</option>
+            <option value="discovery">Discovery</option>
+          </select>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" id="submitNode">Create</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const socket = io();
+    const container = document.getElementById('packagesContainer');
+
+    document.getElementById('stopAllBtn').onclick = () => {
+      fetch('/api/stop_all', { method: 'POST' });
+    };
+    document.getElementById('buildBtn').onclick = () => {
+      fetch('/api/build', { method: 'POST' });
+    };
+
+    document.getElementById('createPackageBtn').onclick = () => {
+      new bootstrap.Modal(document.getElementById('packageModal')).show();
+    };
+
+    document.getElementById('createNodeBtn').onclick = () => {
+      new bootstrap.Modal(document.getElementById('nodeModal')).show();
+    };
+
+    document.getElementById('submitPackage').onclick = () => {
+      fetch('/api/create_package', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: document.getElementById('pkgName').value,
+          dependencies: document.getElementById('pkgDeps').value
+        })
+      }).then(() => location.reload());
+    };
+
+    document.getElementById('submitNode').onclick = () => {
+      fetch('/api/create_node', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          package: document.getElementById('nodePkg').value,
+          name: document.getElementById('nodeName').value.replace(/\.py$/, ''),
+          type: document.getElementById('nodeType').value
+        })
+      }).then(() => {
+        bootstrap.Modal.getInstance(document.getElementById('nodeModal')).hide();
+        location.reload();
+      });
+    };
+
+    socket.on('status_update', (data) => {
+      container.innerHTML = '';
+      data.packages.forEach(pkg => {
+        const card = document.createElement('div');
+        card.className = 'card package-card';
+
+        const header = document.createElement('div');
+        header.className = 'card-header fw-bold';
+        header.textContent = pkg.name === '__external__' ? 'External Nodes' : pkg.name;
+
+        const body = document.createElement('div');
+        body.className = 'card-body';
+
+        pkg.nodes.forEach(node => {
+          const item = document.createElement('div');
+          item.className = 'node-item';
+
+          const name = document.createElement('span');
+          name.className = 'node-name';
+          name.textContent = node.name;
+
+          const status = document.createElement('span');
+          status.textContent = node.status;
+          status.className = `node-status ${node.status}`;
+
+          const type = document.createElement('span');
+          type.className = 'node-type';
+          type.textContent = node.type ? `(${node.type})` : '';
+
+          const lifecycle = document.createElement('span');
+          lifecycle.className = 'node-lifecycle';
+          lifecycle.textContent = node.lifecycle ? ' [Lifecycle]' : '';
+
+          const controls = document.createElement('div');
+          controls.className = 'node-controls';
+
+          if (node.type !== 'external') {
+            const btn = document.createElement('button');
+            btn.textContent = node.status === 'running' ? 'Stop' : 'Launch';
+            btn.className = `btn btn-sm ${node.status === 'running' ? 'btn-danger' : 'btn-success'}`;
+            btn.onclick = () => {
+              fetch(`/api/${node.status === 'running' ? 'stop' : 'launch'}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ package: pkg.name, node: node.name })
+              });
+            };
+            controls.appendChild(btn);
+
+            const restartBtn = document.createElement('button');
+            restartBtn.textContent = 'Restart';
+            restartBtn.className = 'btn btn-sm btn-warning';
+            restartBtn.onclick = () => {
+              fetch('/api/restart', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ package: pkg.name, node: node.name })
+              });
+            };
+            controls.appendChild(restartBtn);
+
+            const logBtn = document.createElement('a');
+            logBtn.href = `/api/logs/${pkg.name}/${node.name}`;
+            logBtn.target = '_blank';
+            logBtn.className = 'btn btn-sm btn-outline-dark';
+            logBtn.textContent = 'Logs';
+            controls.appendChild(logBtn);
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.textContent = 'Delete';
+            deleteBtn.className = 'btn btn-sm btn-outline-danger';
+            deleteBtn.onclick = () => {
+              fetch('/api/delete_node', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ package: pkg.name, node: node.name })
+              }).then(() => location.reload());
+            };
+            controls.appendChild(deleteBtn);
+          }
+
+          item.appendChild(name);
+          item.appendChild(type);
+          item.appendChild(lifecycle);
+          item.appendChild(status);
+          item.appendChild(controls);
+          body.appendChild(item);
+        });
+
+        card.appendChild(header);
+        card.appendChild(body);
+        container.appendChild(card);
+      });
+    });
+  </script>
+</body>
+</html>

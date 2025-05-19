@@ -1,0 +1,17 @@
+[0.737s] Invoking command in '/home/r/SpotMicroROS2/build/my_robot_tutorials': PYTHONPATH=/home/r/SpotMicroROS2/build/my_robot_tutorials/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/r/SpotMicroROS2/install/my_robot_tutorials/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/r/SpotMicroROS2/build/my_robot_tutorials/build --no-deps symlink_data
+[1.164s] running develop
+[1.353s] running egg_info
+[1.367s] writing my_robot_tutorials.egg-info/PKG-INFO
+[1.367s] writing dependency_links to my_robot_tutorials.egg-info/dependency_links.txt
+[1.367s] writing entry points to my_robot_tutorials.egg-info/entry_points.txt
+[1.367s] writing requirements to my_robot_tutorials.egg-info/requires.txt
+[1.367s] writing top-level names to my_robot_tutorials.egg-info/top_level.txt
+[1.367s] reading manifest file 'my_robot_tutorials.egg-info/SOURCES.txt'
+[1.367s] writing manifest file 'my_robot_tutorials.egg-info/SOURCES.txt'
+[1.367s] running build_ext
+[1.367s] Creating /home/r/SpotMicroROS2/install/my_robot_tutorials/lib/python3.10/site-packages/my-robot-tutorials.egg-link (link to .)
+[1.367s] Installing minimal_python_node script to /home/r/SpotMicroROS2/install/my_robot_tutorials/lib/my_robot_tutorials
+[1.367s] 
+[1.367s] Installed /home/r/SpotMicroROS2/build/my_robot_tutorials
+[1.367s] running symlink_data
+[1.384s] Invoked command in '/home/r/SpotMicroROS2/build/my_robot_tutorials' returned '0': PYTHONPATH=/home/r/SpotMicroROS2/build/my_robot_tutorials/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/r/SpotMicroROS2/install/my_robot_tutorials/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/r/SpotMicroROS2/build/my_robot_tutorials/build --no-deps symlink_data

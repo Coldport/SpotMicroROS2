@@ -1,0 +1,15 @@
+running develop
+running egg_info
+writing tst_pkg.egg-info/PKG-INFO
+writing dependency_links to tst_pkg.egg-info/dependency_links.txt
+writing entry points to tst_pkg.egg-info/entry_points.txt
+writing requirements to tst_pkg.egg-info/requires.txt
+writing top-level names to tst_pkg.egg-info/top_level.txt
+reading manifest file 'tst_pkg.egg-info/SOURCES.txt'
+writing manifest file 'tst_pkg.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/r/SpotMicroROS2/install/tst_pkg/lib/python3.10/site-packages/tst-pkg.egg-link (link to .)
+Installing tst_node script to /home/r/SpotMicroROS2/install/tst_pkg/lib/tst_pkg
+
+Installed /home/r/SpotMicroROS2/build/tst_pkg
+running symlink_data

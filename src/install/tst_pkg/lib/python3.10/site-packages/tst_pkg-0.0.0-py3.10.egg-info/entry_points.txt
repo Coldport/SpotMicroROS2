@@ -1,0 +1,3 @@
+[console_scripts]
+tst_node = tst_pkg.tst_node:main
+

@@ -1,0 +1,21 @@
+[0.560s] Invoking command in '/home/r/SpotMicroROS2/src/tst_pkg': PYTHONPATH=/home/r/SpotMicroROS2/build/tst_pkg/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/r/SpotMicroROS2/install/tst_pkg/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/tst_pkg build --build-base /home/r/SpotMicroROS2/build/tst_pkg/build install --record /home/r/SpotMicroROS2/build/tst_pkg/install.log --single-version-externally-managed install_data
+[0.657s] running egg_info
+[0.657s] writing ../../build/tst_pkg/tst_pkg.egg-info/PKG-INFO
+[0.657s] writing dependency_links to ../../build/tst_pkg/tst_pkg.egg-info/dependency_links.txt
+[0.658s] writing entry points to ../../build/tst_pkg/tst_pkg.egg-info/entry_points.txt
+[0.658s] writing requirements to ../../build/tst_pkg/tst_pkg.egg-info/requires.txt
+[0.658s] writing top-level names to ../../build/tst_pkg/tst_pkg.egg-info/top_level.txt
+[0.658s] reading manifest file '../../build/tst_pkg/tst_pkg.egg-info/SOURCES.txt'
+[0.663s] writing manifest file '../../build/tst_pkg/tst_pkg.egg-info/SOURCES.txt'
+[0.663s] running build
+[0.663s] running build_py
+[0.667s] running install
+[0.667s] running install_lib
+[0.668s] running install_data
+[0.668s] running install_egg_info
+[0.669s] removing '/home/r/SpotMicroROS2/install/tst_pkg/lib/python3.10/site-packages/tst_pkg-0.0.0-py3.10.egg-info' (and everything under it)
+[0.669s] Copying ../../build/tst_pkg/tst_pkg.egg-info to /home/r/SpotMicroROS2/install/tst_pkg/lib/python3.10/site-packages/tst_pkg-0.0.0-py3.10.egg-info
+[0.671s] running install_scripts
+[0.680s] Installing tst_node script to /home/r/SpotMicroROS2/install/tst_pkg/lib/tst_pkg
+[0.680s] writing list of installed files to '/home/r/SpotMicroROS2/build/tst_pkg/install.log'
+[0.700s] Invoked command in '/home/r/SpotMicroROS2/src/tst_pkg' returned '0': PYTHONPATH=/home/r/SpotMicroROS2/build/tst_pkg/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/r/SpotMicroROS2/install/tst_pkg/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/tst_pkg build --build-base /home/r/SpotMicroROS2/build/tst_pkg/build install --record /home/r/SpotMicroROS2/build/tst_pkg/install.log --single-version-externally-managed install_data
