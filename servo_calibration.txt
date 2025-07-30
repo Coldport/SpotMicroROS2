@@ -1,0 +1,70 @@
+{
+    "Front Right": {
+        "Hip": {
+            "channel": "15",
+            "angle": "90",
+            "range": "180"
+        },
+        "Thigh": {
+            "channel": "14",
+            "angle": "95",
+            "range": "180"
+        },
+        "Knee": {
+            "channel": "13",
+            "angle": "90",
+            "range": "270"
+        }
+    },
+    "Front Left": {
+        "Hip": {
+            "channel": "0",
+            "angle": "50",
+            "range": "180"
+        },
+        "Thigh": {
+            "channel": "0",
+            "angle": "90",
+            "range": "270"
+        },
+        "Knee": {
+            "channel": "0",
+            "angle": "90",
+            "range": "270"
+        }
+    },
+    "Back Right": {
+        "Hip": {
+            "channel": "0",
+            "angle": "90",
+            "range": "270"
+        },
+        "Thigh": {
+            "channel": "0",
+            "angle": "90",
+            "range": "270"
+        },
+        "Knee": {
+            "channel": "0",
+            "angle": "90",
+            "range": "270"
+        }
+    },
+    "Back Left": {
+        "Hip": {
+            "channel": "0",
+            "angle": "90",
+            "range": "270"
+        },
+        "Thigh": {
+            "channel": "0",
+            "angle": "90",
+            "range": "270"
+        },
+        "Knee": {
+            "channel": "0",
+            "angle": "90",
+            "range": "270"
+        }
+    }
+}
