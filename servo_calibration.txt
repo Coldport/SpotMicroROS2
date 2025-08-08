@@ -1,70 +1,82 @@
 {
     "Front Right": {
         "Hip": {
-            "channel": "15",
+            "channel": "12",
             "angle": "90",
-            "range": "180"
+            "range": "270",
+            "offset": "-5"
         },
         "Thigh": {
-            "channel": "14",
-            "angle": "95",
-            "range": "180"
+            "channel": "11",
+            "angle": "120",
+            "range": "270",
+            "offset": "5"
         },
         "Knee": {
-            "channel": "13",
-            "angle": "90",
-            "range": "270"
+            "channel": "10",
+            "angle": "120",
+            "range": "270",
+            "offset": "6"
         }
     },
     "Front Left": {
         "Hip": {
-            "channel": "0",
-            "angle": "50",
-            "range": "180"
+            "channel": "15",
+            "angle": "90",
+            "range": "180",
+            "offset": "7"
         },
         "Thigh": {
-            "channel": "0",
-            "angle": "90",
-            "range": "270"
+            "channel": "14",
+            "angle": "60",
+            "range": "180",
+            "offset": "6"
         },
         "Knee": {
-            "channel": "0",
-            "angle": "90",
-            "range": "270"
+            "channel": "13",
+            "angle": "60",
+            "range": "270",
+            "offset": "5"
         }
     },
     "Back Right": {
         "Hip": {
-            "channel": "0",
+            "channel": "3",
             "angle": "90",
-            "range": "270"
+            "range": "270",
+            "offset": "0"
         },
         "Thigh": {
-            "channel": "0",
-            "angle": "90",
-            "range": "270"
+            "channel": "4",
+            "angle": "120",
+            "range": "270",
+            "offset": "7.5"
         },
         "Knee": {
-            "channel": "0",
-            "angle": "90",
-            "range": "270"
+            "channel": "5",
+            "angle": "120",
+            "range": "270",
+            "offset": "5"
         }
     },
     "Back Left": {
         "Hip": {
             "channel": "0",
             "angle": "90",
-            "range": "270"
+            "range": "270",
+            "offset": "0"
         },
         "Thigh": {
-            "channel": "0",
-            "angle": "90",
-            "range": "270"
+            "channel": "1",
+            "angle": "60",
+            "range": "270",
+            "offset": "-5"
         },
         "Knee": {
-            "channel": "0",
-            "angle": "90",
-            "range": "270"
+            "channel": "2",
+            "angle": "60",
+            "range": "270",
+            "offset": "5"
         }
     }
 }
