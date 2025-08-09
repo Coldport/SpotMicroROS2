@@ -1,9 +1,10 @@
 import tkinter as tk
 from tkinter import ttk
+from tkinter import messagebox as mb
 import json
 import os
 import time
-import numpy as np  # NEW: needed for IK math
+import numpy as np
 import board
 from adafruit_motor import servo
 from adafruit_pca9685 import PCA9685
@@ -69,7 +70,7 @@ def save_config(data):
         json.dump(data, f, indent=4)
 
 # =========================
-# Your IK (exact math you posted)
+# Your IK (kept as-is, but outputs converted to DEGREES explicitly)
 # =========================
 def ik_rotational_preprocess_xyz(leg_name, X, Y, Z, roll, pitch, yaw, angles_in_degrees=True):
     """
@@ -83,7 +84,6 @@ def ik_rotational_preprocess_xyz(leg_name, X, Y, Z, roll, pitch, yaw, angles_in_
     else:
         roll_rad, pitch_rad, yaw_rad = roll, pitch, yaw
 
-    # Your constants (as in your Leg.HIP_OFFSETS usage): 93 and 40 and 43.5
     z_off = 93 * np.sin(pitch_rad)
     if leg_name in ["FL", "FR"]:
         new_Z1 = Z + z_off
@@ -104,33 +104,34 @@ def ik_rotational_preprocess_xyz(leg_name, X, Y, Z, roll, pitch, yaw, angles_in_
 
     return float(new_X), float(new_Y2), float(new_Z1)
 
-def ik_inverse_kinematics(leg_name, X, Y, Z):
+def ik_inverse_kinematics_deg(leg_name, X, Y, Z):
     """
-    Your original IK (kept as-is), returns (hip, lower, upper) in radians.
+    Your original IK math (radians internally), but returns angles in DEGREES.
+    Returns: (hip_deg, thigh_deg, knee_deg)
     """
-    # Adjust Y by adding the 40mm hip offset
+    # --- original math in radians ---
     Y_adjusted = Y + 40.0
-
-    # Intermediate distances
     D = np.sqrt(Y_adjusted**2 + Z**2 - 1600.0)  # 40^2 = 1600
     G = np.sqrt(D**2 + X**2)
+    hip_rad = np.arctan2(Z, Y_adjusted) + np.arctan2(40.0, D)
+    lower_rad = np.arccos((G**2 - 28800.0) / (-28800.0)) + np.deg2rad(30)  # 2 * 120^2
+    upper_rad = np.arctan2(D, X) - np.arcsin((120.0 * np.sin(lower_rad - np.deg2rad(30) )) / G)
 
-    # Joint angles
-    hip_angle = np.arctan2(Z, Y_adjusted) + np.arctan2(40.0, D)
-    lower_angle = np.arccos((G**2 - 28800.0) / (-28800.0))  # 2 * 120^2 = 28800
-    upper_angle = np.arctan2(D, X) - np.arcsin((120.0 * np.sin(lower_angle)) / G)
+    # Right legs mirrored (same as your code)
+    if leg_name in ["FR","BR"]:
+        lower_rad = np.pi - lower_rad  
+        upper_rad = np.pi - upper_rad
 
-    # Apply angle conversion for right legs
-    if leg_name in IK_RIGHT_LEG:
-        lower_angle = np.pi - lower_angle
-        upper_angle = np.pi - upper_angle
-
-    return hip_angle, lower_angle, upper_angle
+    # --- explicit conversion to degrees ---
+    hip_deg   = float(np.degrees(hip_rad))
+    thigh_deg = float(np.degrees(lower_rad))
+    knee_deg  = float(np.degrees(upper_rad))
+    return hip_deg, thigh_deg, knee_deg
 
 def ik_create_points(start, end, steps):
     """
-    Your linear 6D pose interpolation (kept as-is).
-    start/end: [x,y,z,roll,pitch,yaw] (degrees for angles)
+    Linear 6D pose interpolation (kept as-is).
+    start/end: [x,y,z,roll,pitch,yaw] (angles in degrees)
     """
     if steps < 1:
         raise ValueError("steps must be >= 1")
@@ -176,34 +177,28 @@ class ServoCalApp:
             self._get_any("speed", default=30.0)
         ))
 
-        # IK state
+        # IK state (all values stored in DEGREES)
         self.tab_ik_vars = {leg: {} for leg in LEGS}
         self.ik_running = {leg: False for leg in LEGS}
         self.ik_waypoints = {leg: [] for leg in LEGS}
         self.ik_step_index = {leg: 0 for leg in LEGS}
         self.ik_direction = {leg: +1 for leg in LEGS}
-        # Current logical angles (deg) tracked for speed limiting
-        self.ik_current_deg = {
-            leg: {"Hip": 90.0, "Thigh": 90.0, "Knee": 90.0} for leg in LEGS
-        }
-        # Targets (deg) for the current waypoint
-        self.ik_target_deg = {
-            leg: {"Hip": 90.0, "Thigh": 90.0, "Knee": 90.0} for leg in LEGS
-        }
+        self.ik_current_deg = {leg: {"Hip": 90.0, "Thigh": 90.0, "Knee": 90.0} for leg in LEGS}
+        self.ik_target_deg  = {leg: {"Hip": 90.0, "Thigh": 90.0, "Knee": 90.0} for leg in LEGS}
 
         # Tabs
         self.notebook = ttk.Notebook(root)
         self.tab_manual = ttk.Frame(self.notebook)
         self.tab_cycle = ttk.Frame(self.notebook)
-        self.tab_ik = ttk.Frame(self.notebook)  # NEW
+        self.tab_ik = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_manual, text="Manual")
         self.notebook.add(self.tab_cycle, text="Cycle")
-        self.notebook.add(self.tab_ik, text="IK Cycle")  # NEW
+        self.notebook.add(self.tab_ik, text="IK Cycle")
         self.notebook.pack(fill="both", expand=True)
 
         self._build_manual_tab()
         self._build_cycle_tab()
-        self._build_ik_tab()  # NEW
+        self._build_ik_tab()
 
         # Bottom bar
         bottom = ttk.Frame(root)
@@ -354,10 +349,10 @@ class ServoCalApp:
             ch = int(self.manual_vars[leg][joint]["ch_var"].get())
             act_range = int(self.manual_vars[leg][joint]["range_var"].get())
             offset = float(self.manual_vars[leg][joint]["offset_var"].get())
-            angle = float(self.manual_vars[leg][joint]["angle_var"].get())
+            angle = float(self.manual_vars[leg][joint]["angle_var"].get())  # degrees
             actual = clamp(angle + offset, 0.0, float(act_range))
             s = create_servo(ch, act_range)
-            s.angle = actual
+            s.angle = actual  # degrees
             src = "slider" if from_slider else "manual"
             self.status_var.set(f"[{src}] {leg}-{joint} → {angle:.2f}+{offset:.2f}={actual:.2f}° (ch {ch}, range {act_range})")
         except Exception as e:
@@ -470,7 +465,6 @@ class ServoCalApp:
                     "direction": +1,
                 }
 
-    # Cycle control
     def start_cycle(self, leg, joint):
         try:
             cyc = self.cycle_vars[leg][joint]
@@ -501,12 +495,11 @@ class ServoCalApp:
         for leg in LEGS:
             self.ik_running[leg] = False
 
-    # -------- IK Tab (NEW) --------
+    # ---------- IK Tab (vertical layout + confirmation, DEGREES throughout) ----------
     def _build_ik_tab(self):
         outer = ttk.Frame(self.tab_ik)
         outer.pack(fill="both", expand=True)
 
-        # Top controls: universal speed + run/stop all
         top = ttk.Frame(outer)
         top.pack(fill="x", side="top", padx=6, pady=6)
         ttk.Label(top, text="Universal Speed (°/s):").pack(side="left", padx=4)
@@ -525,43 +518,68 @@ class ServoCalApp:
             frame = ttk.LabelFrame(container, text=f"{leg} — IK Cycle", padding=10)
             frame.grid(row=row, column=col, sticky="nsew", padx=6, pady=6)
 
-            # Header
-            hdr = ttk.Frame(frame)
-            hdr.pack(fill="x")
-            ttk.Label(hdr, text="Start [x y z r p y]").pack(side="left", padx=6)
-            ttk.Label(hdr, text="End [x y z r p y]").pack(side="left", padx=20)
-            ttk.Label(hdr, text="Steps").pack(side="left", padx=20)
-
-            row1 = ttk.Frame(frame)
-            row1.pack(fill="x", pady=4)
-
-            # Start pose entries
+            start_box = ttk.LabelFrame(frame, text="Start Pose [x y z roll pitch yaw]")
+            start_box.pack(fill="x", pady=4)
             sv = [tk.DoubleVar(value=v) for v in [0, 0, 120, 0, 0, 0]]
+            start_row = ttk.Frame(start_box); start_row.pack(fill="x", pady=2)
             for i in range(6):
-                ttk.Entry(row1, textvariable=sv[i], width=6).pack(side="left", padx=2)
+                ttk.Entry(start_row, textvariable=sv[i], width=6).pack(side="left", padx=2)
 
-            # End pose entries
+            end_box = ttk.LabelFrame(frame, text="End Pose [x y z roll pitch yaw]")
+            end_box.pack(fill="x", pady=4)
             ev = [tk.DoubleVar(value=v) for v in [0, 0, 90, 0, 0, 0]]
+            end_row = ttk.Frame(end_box); end_row.pack(fill="x", pady=2)
             for i in range(6):
-                ttk.Entry(row1, textvariable=ev[i], width=6).pack(side="left", padx=2)
+                ttk.Entry(end_row, textvariable=ev[i], width=6).pack(side="left", padx=2)
 
+            control_row = ttk.Frame(frame)
+            control_row.pack(fill="x", pady=6)
+            ttk.Label(control_row, text="Steps:").pack(side="left", padx=4)
             steps_var = tk.IntVar(value=10)
-            ttk.Entry(row1, textvariable=steps_var, width=5).pack(side="left", padx=8)
-
-            row2 = ttk.Frame(frame)
-            row2.pack(fill="x", pady=4)
-            ttk.Button(row2, text="Start", command=lambda l=leg: self.ik_start_leg(l)).pack(side="left", padx=4)
-            ttk.Button(row2, text="Stop", command=lambda l=leg: self.ik_stop_leg(l)).pack(side="left", padx=4)
+            ttk.Entry(control_row, textvariable=steps_var, width=6).pack(side="left", padx=4)
+            ttk.Button(control_row, text="Start", command=lambda l=leg: self.ik_start_leg(l)).pack(side="left", padx=6)
+            ttk.Button(control_row, text="Stop", command=lambda l=leg: self.ik_stop_leg(l)).pack(side="left", padx=6)
 
             self.tab_ik_vars[leg] = {
-                "start_vars": sv,   # list of 6 DoubleVar
-                "end_vars": ev,     # list of 6 DoubleVar
+                "start_vars": sv,
+                "end_vars": ev,
                 "steps_var": steps_var
             }
 
     def ik_run_all(self):
         for leg in LEGS:
             self.ik_start_leg(leg)
+
+    def _ik_preview_angles_over_path(self, leg, pts):
+        """
+        Compute IK for all waypoints, return (angles_deg_list, summary_str).
+        angles are DEGREES.
+        """
+        ikname = IK_LEG_NAME[leg]
+        out = []
+        hip_vals, th_vals, kn_vals = [], [], []
+        for pose in pts:
+            x, y, z, r, p, ya = pose
+            xh, yh, zh = ik_rotational_preprocess_xyz(ikname, x, y, z, r, p, ya, angles_in_degrees=True)
+            hip_d, th_d, kn_d = ik_inverse_kinematics_deg(ikname, x, y, z)
+            out.append({"Hip": hip_d, "Thigh": th_d, "Knee": kn_d})
+            hip_vals.append(hip_d); th_vals.append(th_d); kn_vals.append(kn_d)
+
+        def rng(v): 
+            return (min(v), max(v))
+
+        h_min, h_max = rng(hip_vals)
+        t_min, t_max = rng(th_vals)
+        k_min, k_max = rng(kn_vals)
+        summary = (
+            f"{leg} IK angle ranges (deg):\n"
+            f"  Hip:   {h_min:.1f} → {h_max:.1f}\n"
+            f"  Thigh: {t_min:.1f} → {t_max:.1f}\n"
+            f"  Knee:  {k_min:.1f} → {k_max:.1f}\n\n"
+            f"First waypoint (deg): "
+            f"Hip={out[0]['Hip']:.1f}, Thigh={out[0]['Thigh']:.1f}, Knee={out[0]['Knee']:.1f}"
+        )
+        return out, summary
 
     def ik_start_leg(self, leg):
         try:
@@ -571,13 +589,25 @@ class ServoCalApp:
             steps = int(v["steps_var"].get())
             pts = ik_create_points(start, end, steps)
 
+            # Preview angles (DEGREES) and ask for confirmation
+            angles_list, summary = self._ik_preview_angles_over_path(leg, pts)
+            print(summary)
+            self.status_var.set(summary.replace("\n", " | "))
+            if not mb.askyesno("Confirm IK Start", f"{summary}\n\nProceed with this motion?"):
+                self.status_var.set(f"IK cancelled for {leg}")
+                return
+
+            # Initialize trajectory
             self.ik_waypoints[leg] = pts
             self.ik_step_index[leg] = 0
             self.ik_direction[leg] = +1
             self.ik_running[leg] = True
 
-            # Initialize current and target from first point
+            # Seed current & target from first point (DEGREES)
             self._ik_update_targets_from_pose(leg, pts[0])
+            for j in JOINTS:
+                self.ik_current_deg[leg][j] = self.ik_target_deg[leg][j]
+
             self.status_var.set(f"IK started for {leg} with {steps} steps")
         except Exception as e:
             self.status_var.set(f"IK start error for {leg}: {e}")
@@ -586,19 +616,12 @@ class ServoCalApp:
         self.ik_running[leg] = False
         self.status_var.set(f"IK stopped for {leg}")
 
-    # ---- IK tick helpers ----
     def _ik_update_targets_from_pose(self, leg, pose6):
-        """Compute IK targets (deg) for this leg from a 6D pose."""
+        """Compute IK targets (DEGREES) for this leg from a 6D pose."""
         x, y, z, r, p, ya = pose6
         ikname = IK_LEG_NAME[leg]
         xh, yh, zh = ik_rotational_preprocess_xyz(ikname, x, y, z, r, p, ya, angles_in_degrees=True)
-        hip_r, low_r, up_r = ik_inverse_kinematics(ikname, xh, yh, zh)
-
-        # Convert to degrees for output layer
-        hip_d = float(np.rad2deg(hip_r))
-        thigh_d = float(np.rad2deg(low_r))   # your "lower" -> thigh
-        knee_d = float(np.rad2deg(up_r))     # your "upper" -> knee
-
+        hip_d, thigh_d, knee_d = ik_inverse_kinematics_deg(ikname, xh, yh, zh)
         self.ik_target_deg[leg]["Hip"] = hip_d
         self.ik_target_deg[leg]["Thigh"] = thigh_d
         self.ik_target_deg[leg]["Knee"] = knee_d
@@ -607,8 +630,7 @@ class ServoCalApp:
         """Advance to next waypoint if all joints are within eps degrees."""
         for j in JOINTS:
             if abs(self.ik_current_deg[leg][j] - self.ik_target_deg[leg][j]) > eps:
-                return  # not yet
-        # reached: move to next
+                return
         idx = self.ik_step_index[leg] + self.ik_direction[leg]
         pts = self.ik_waypoints[leg]
         if idx >= len(pts):
@@ -627,7 +649,6 @@ class ServoCalApp:
         for leg in LEGS:
             if not self.ik_running[leg]:
                 continue
-            # Update logical angles toward targets
             for j in JOINTS:
                 cur = self.ik_current_deg[leg][j]
                 tgt = self.ik_target_deg[leg][j]
@@ -635,19 +656,15 @@ class ServoCalApp:
                     self.ik_current_deg[leg][j] = tgt
                 else:
                     self.ik_current_deg[leg][j] = cur + step_deg * np.sign(tgt - cur)
-            # Waypoint management
             self._ik_advance_waypoint_if_reached(leg)
 
     def _ik_tick_command_all(self):
         """
-        Send servo commands for IK **in three passes**:
-        1) all Hips, 2) all Thighs, 3) all Knees.
-        Uses the per-leg channel/range/offset from the Manual/Cycle forms.
+        Send servo commands for IK in three passes (Hips -> Thighs -> Knees).
+        Values are DEGREES; offsets/range are applied in degrees.
         """
-        # Helper to send a single joint
         def send_joint(leg, joint):
             try:
-                # Source config: prefer Manual tab if present, else Cycle tab
                 if leg in self.manual_vars and joint in self.manual_vars[leg]:
                     ch = int(self.manual_vars[leg][joint]["ch_var"].get())
                     act_range = int(self.manual_vars[leg][joint]["range_var"].get())
@@ -657,15 +674,15 @@ class ServoCalApp:
                     act_range = int(self.cycle_vars[leg][joint]["range_var"].get())
                     offset = float(self.cycle_vars[leg][joint]["offset_var"].get())
 
-                logical = float(self.ik_current_deg[leg][joint])  # deg
-                actual = clamp(logical + offset, 0.0, float(act_range))
+                logical_deg = float(self.ik_current_deg[leg][joint])  # degrees
+                actual_deg = clamp(logical_deg + offset, 0.0, float(act_range))
                 s = create_servo(ch, act_range)
-                s.angle = actual
+                s.angle = actual_deg  # degrees to Adafruit servo
 
                 # keep manual slider in sync
                 if leg in self.manual_vars and joint in self.manual_vars[leg]:
-                    self.manual_vars[leg][joint]["angle_var"].set(logical)
-                    self._set_slider_from_angle(leg, joint, logical)
+                    self.manual_vars[leg][joint]["angle_var"].set(logical_deg)
+                    self._set_slider_from_angle(leg, joint, logical_deg)
             except Exception as e:
                 self.status_var.set(f"IK cmd error {leg}-{joint}: {e}")
 
@@ -688,7 +705,7 @@ class ServoCalApp:
         dt = max(0.0, now - self.last_cycle_ts)
         self.last_cycle_ts = now
 
-        # Legacy cycle: compute then command (together per frame)
+        # Legacy cycle: compute then command
         self._cycle_tick_compute_all(dt)
         self._cycle_tick_command_all()
 
@@ -731,10 +748,10 @@ class ServoCalApp:
                     ch = int(vars_j["ch_var"].get())
                     act_range = int(vars_j["range_var"].get())
                     offset = float(vars_j["offset_var"].get())
-                    logical = float(vars_j["current_angle"])
+                    logical = float(vars_j["current_angle"])  # degrees
                     actual = clamp(logical + offset, 0.0, float(act_range))
                     s = create_servo(ch, act_range)
-                    s.angle = actual
+                    s.angle = actual  # degrees
 
                     if leg in self.manual_vars and joint in self.manual_vars[leg]:
                         self.manual_vars[leg][joint]["angle_var"].set(logical)
@@ -756,7 +773,6 @@ class ServoCalApp:
                     rng = mv["range_var"].get()
                     off = mv["offset_var"].get()
                 else:
-                    mv = None
                     ch = self.cycle_vars[leg][joint]["ch_var"].get()
                     angle = f'{self.cycle_vars[leg][joint]["current_angle"]:.2f}'
                     rng = self.cycle_vars[leg][joint]["range_var"].get()

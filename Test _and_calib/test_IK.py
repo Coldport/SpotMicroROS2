@@ -1,5 +1,12 @@
 import numpy as np
 import threading
+from adafruit_motor import servo
+from adafruit_pca9685 import PCA9685
+import board
+import time
+
+
+
 class DOG:
     """
     A class to represent the DOG robot.
@@ -104,11 +111,11 @@ class Leg:
         if leg_name in ["FL", "RL"]:  # Left legs
             self._safe_lower_angle = 60.0
             self._safe_upper_angle = 60.0
-            self.from_180 = False
+            self.from_180 = True
         else:  # Right legs (FR, RR)
             self._safe_lower_angle = 120.0
             self._safe_upper_angle = 120.0
-            self.from_180 = True
+            self.from_180 = False
 
         # Initialize current angles to safe positions
         self.hip_angle = self._safe_hip_angle
@@ -138,18 +145,33 @@ class Leg:
         # Calculate intermediate distances
         D = np.sqrt(Y_adjusted**2 + Z**2 - 1600)  # 40^2 = 1600
         G = np.sqrt(D**2 + X**2)
+        #print(self.leg_name)
 
         # Calculate joint angles
-        hip_angle = np.arctan2(Z, Y_adjusted) + np.arctan2(40, D)
-        lower_angle = np.arccos((G**2 - 28800) / (-28800))  # 2 * 120^2 = 28800
-        upper_angle = np.arctan2(D, X) - np.arcsin((120 * np.sin(lower_angle)) / G)
+        if self.leg_name in ["RL"]:
+
+            hip_angle = np.arctan2(Z, Y_adjusted) + np.arctan2(40, D)
+            lower_angle = np.arccos((G**2 - 28800) / (-28800))  # 2 * 120^2 = 28800
+            upper_angle = np.arctan2(D, X) - np.arcsin((120 * np.sin(lower_angle)) / G)
+            upper_angle = np.pi/2 - upper_angle
+
+        elif self.leg_name in ["FL"]:
+
+            hip_angle = np.arctan2(Z, Y_adjusted) + np.arctan2(40, D) + np.pi/4
+            lower_angle = np.arccos((G**2 - 28800) / (-28800))  # 2 * 120^2 = 28800
+            upper_angle = np.arctan2(D, X) - np.arcsin((120 * np.sin(lower_angle)) / G)
+            upper_angle = np.pi/2  - upper_angle + np.pi/4
+            lower_angle = lower_angle  
+
+        
 
         # Apply angle conversion for right legs
-        if self.from_180:
-            lower_angle = np.pi - lower_angle
-            upper_angle = np.pi - upper_angle
+        #if self.from_180:
+        #lower_angle = np.pi - lower_angle
+        
             
-        self.current_angles = (hip_angle, lower_angle, upper_angle)
+        
+        #lower_angle = upper_angle + lower_angle
         return hip_angle, lower_angle, upper_angle
 
 
@@ -269,17 +291,37 @@ class Leg:
 
 def main():
 
+    i2c = board.I2C()  # uses board.SCL and board.SDA
+    pca = PCA9685(i2c)
+    pca.frequency = 50
+    servo0 = servo.Servo(pca.channels[15],
+            min_pulse=500,
+            max_pulse=2500,
+            actuation_range=270
+        )
+    servo1 = servo.Servo(pca.channels[14],
+            min_pulse=500,
+            max_pulse=2500,
+            actuation_range=270
+        )
+    servo2 = servo.Servo(pca.channels[13],
+            min_pulse=500,
+            max_pulse=2500,
+            actuation_range=270
+        )
+
+
     print("-" * 40)
-    leg1 = Leg("FR")
+    leg1 = Leg("FL")
     leg2 = Leg("FR")
     leg3 = Leg("RL")
     leg4 = Leg("RR")
 
     print("Test Trajectory interpolation")
     
-    start_pose = [0, 0, 120, -10, 0, 0]    # Start: foot below, no rotation
-    end_pose = [0, 0, 90, -10, 0, 0]   # End: foot forward/right, slight yaw
-    steps = 6
+    start_pose = [0, 0, 150, 0, 0, 20]    # Start: foot below, no rotation
+    end_pose = [0, 0, 150, 0, 0, -20]   # End: foot forward/right, slight yaw
+    steps = 30
     
     print(f"Interpolating from {start_pose} to {end_pose} in {steps} steps:")
 
@@ -291,6 +333,25 @@ def main():
 
         print(f"  Step {i}: body=({x:.1f},{y:.1f},{z:.1f}) rot=({roll:.1f}, {pitch:.1f}, {yaw:.1f}) "
               f"-> angles=({np.rad2deg(hip_angle):.1f}, {np.rad2deg(lower_angle):.1f}, {np.rad2deg(upper_angle):.1f})°")
+        
+        servo0.angle = np.rad2deg(hip_angle)
+        servo1.angle = np.rad2deg(upper_angle)
+        servo2.angle = np.rad2deg(lower_angle)
+        time.sleep(0.051)
+
+    trajectory = leg1.create_points( end_pose,start_pose, steps)
+    for i, point in enumerate(trajectory):
+        x, y, z, roll, pitch, yaw = point
+        x_hip, y_hip, z_hip = leg1.rotational_preprocess_xyz(x, y, z, roll, pitch, yaw)
+        hip_angle, lower_angle, upper_angle = leg1.inverse_kinematics(x_hip, y_hip, z_hip)
+
+        print(f"  Step {i}: body=({x:.1f},{y:.1f},{z:.1f}) rot=({roll:.1f}, {pitch:.1f}, {yaw:.1f}) "
+              f"-> angles=({np.rad2deg(hip_angle):.1f}, {np.rad2deg(lower_angle):.1f}, {np.rad2deg(upper_angle):.1f})°")
+        
+        servo0.angle = np.rad2deg(hip_angle)
+        servo1.angle = np.rad2deg(upper_angle)
+        servo2.angle = np.rad2deg(lower_angle)
+        time.sleep(0.051)
     
     # Test 4: All legs comparison
     print("\n" + "-" * 40)
