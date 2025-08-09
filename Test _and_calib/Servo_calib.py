@@ -3,6 +3,7 @@ from tkinter import ttk
 import json
 import os
 import time
+import numpy as np  # NEW: needed for IK math
 import board
 from adafruit_motor import servo
 from adafruit_pca9685 import PCA9685
@@ -25,6 +26,15 @@ LEG_POSITIONS_2x2 = {
     "Back Right": (1, 0),
     "Back Left": (1, 1),
 }
+
+# Mapping to your IK leg names and from_180 rule
+IK_LEG_NAME = {
+    "Front Right": "FR",
+    "Front Left":  "FL",
+    "Back Right":  "RR",
+    "Back Left":   "RL",
+}
+IK_RIGHT_LEG = {"FR", "RR"}  # your from_180=True
 
 CONFIG_FILE = "servo_calibration.txt"
 
@@ -59,12 +69,95 @@ def save_config(data):
         json.dump(data, f, indent=4)
 
 # =========================
+# Your IK (exact math you posted)
+# =========================
+def ik_rotational_preprocess_xyz(leg_name, X, Y, Z, roll, pitch, yaw, angles_in_degrees=True):
+    """
+    Your original body -> hip pre-processor (kept as-is).
+    Uses simple offsets tied to roll/pitch/yaw and leg side.
+    """
+    if angles_in_degrees:
+        roll_rad = np.deg2rad(roll)
+        pitch_rad = np.deg2rad(pitch)
+        yaw_rad = np.deg2rad(yaw)
+    else:
+        roll_rad, pitch_rad, yaw_rad = roll, pitch, yaw
+
+    # Your constants (as in your Leg.HIP_OFFSETS usage): 93 and 40 and 43.5
+    z_off = 93 * np.sin(pitch_rad)
+    if leg_name in ["FL", "FR"]:
+        new_Z1 = Z + z_off
+    else:
+        new_Z1 = Z - z_off
+
+    y_off = new_Z1 * np.sin(roll_rad)
+    if leg_name in ["FL", "RL"]:
+        new_Y2 = Y + y_off
+    else:
+        new_Y2 = Y - y_off
+
+    Xoff = 43.5 * np.sin(yaw_rad)
+    if leg_name in ["FL", "FR"]:
+        new_X = X + Xoff
+    else:
+        new_X = X - Xoff
+
+    return float(new_X), float(new_Y2), float(new_Z1)
+
+def ik_inverse_kinematics(leg_name, X, Y, Z):
+    """
+    Your original IK (kept as-is), returns (hip, lower, upper) in radians.
+    """
+    # Adjust Y by adding the 40mm hip offset
+    Y_adjusted = Y + 40.0
+
+    # Intermediate distances
+    D = np.sqrt(Y_adjusted**2 + Z**2 - 1600.0)  # 40^2 = 1600
+    G = np.sqrt(D**2 + X**2)
+
+    # Joint angles
+    hip_angle = np.arctan2(Z, Y_adjusted) + np.arctan2(40.0, D)
+    lower_angle = np.arccos((G**2 - 28800.0) / (-28800.0))  # 2 * 120^2 = 28800
+    upper_angle = np.arctan2(D, X) - np.arcsin((120.0 * np.sin(lower_angle)) / G)
+
+    # Apply angle conversion for right legs
+    if leg_name in IK_RIGHT_LEG:
+        lower_angle = np.pi - lower_angle
+        upper_angle = np.pi - upper_angle
+
+    return hip_angle, lower_angle, upper_angle
+
+def ik_create_points(start, end, steps):
+    """
+    Your linear 6D pose interpolation (kept as-is).
+    start/end: [x,y,z,roll,pitch,yaw] (degrees for angles)
+    """
+    if steps < 1:
+        raise ValueError("steps must be >= 1")
+    if len(start) != 6 or len(end) != 6:
+        raise ValueError("start/end must be [x,y,z,roll,pitch,yaw]")
+
+    x1, y1, z1, r1, p1, ya1 = start
+    x2, y2, z2, r2, p2, ya2 = end
+    pts = []
+    for i in range(steps + 1):
+        t = i / steps
+        x = x1 + t * (x2 - x1)
+        y = y1 + t * (y2 - y1)
+        z = z1 + t * (z2 - z1)
+        r = r1 + t * (r2 - r1)
+        p = p1 + t * (p2 - p1)
+        ya = ya1 + t * (ya2 - ya1)
+        pts.append([x, y, z, r, p, ya])
+    return pts
+
+# =========================
 # GUI App
 # =========================
 class ServoCalApp:
     def __init__(self, root):
         self.root = root
-        root.title("Spot Micro Servo Calibration")
+        root.title("Spot Micro Servo Calibration + IK")
         root.geometry("1150x780")
 
         self.status_var = tk.StringVar(value="Ready")
@@ -75,25 +168,42 @@ class ServoCalApp:
         self.cycle_vars = {leg: {} for leg in LEGS}
 
         # Per-joint runtime cycle state
-        # running, direction (+1/-1), current_angle
         self.cycle_state = {leg: {} for leg in LEGS}
 
-        # Global cycle clock and universal speed
+        # Global cycle clock and universal speed (deg/s)
         self.last_cycle_ts = time.time()
         self.universal_speed = tk.DoubleVar(value=float(
             self._get_any("speed", default=30.0)
         ))
 
+        # IK state
+        self.tab_ik_vars = {leg: {} for leg in LEGS}
+        self.ik_running = {leg: False for leg in LEGS}
+        self.ik_waypoints = {leg: [] for leg in LEGS}
+        self.ik_step_index = {leg: 0 for leg in LEGS}
+        self.ik_direction = {leg: +1 for leg in LEGS}
+        # Current logical angles (deg) tracked for speed limiting
+        self.ik_current_deg = {
+            leg: {"Hip": 90.0, "Thigh": 90.0, "Knee": 90.0} for leg in LEGS
+        }
+        # Targets (deg) for the current waypoint
+        self.ik_target_deg = {
+            leg: {"Hip": 90.0, "Thigh": 90.0, "Knee": 90.0} for leg in LEGS
+        }
+
         # Tabs
         self.notebook = ttk.Notebook(root)
         self.tab_manual = ttk.Frame(self.notebook)
         self.tab_cycle = ttk.Frame(self.notebook)
+        self.tab_ik = ttk.Frame(self.notebook)  # NEW
         self.notebook.add(self.tab_manual, text="Manual")
         self.notebook.add(self.tab_cycle, text="Cycle")
+        self.notebook.add(self.tab_ik, text="IK Cycle")  # NEW
         self.notebook.pack(fill="both", expand=True)
 
         self._build_manual_tab()
         self._build_cycle_tab()
+        self._build_ik_tab()  # NEW
 
         # Bottom bar
         bottom = ttk.Frame(root)
@@ -101,15 +211,14 @@ class ServoCalApp:
         ttk.Button(bottom, text="Save Config", command=self.on_save).pack(side="right", padx=8, pady=6)
         ttk.Label(bottom, textvariable=self.status_var, relief="sunken", anchor="w").pack(side="left", fill="x", expand=True)
 
-        # Schedule cycle updates (frame-synced)
-        self._schedule_cycle_tick()
+        # Schedule updates (frame-synced)
+        self._schedule_tick()
 
         # Close handler
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # ---------- helpers ----------
     def _get_any(self, key, default=None):
-        # try pull a value from any joint to seed a global default (e.g., speed)
         for leg in LEGS:
             for joint in JOINTS:
                 v = self.config_data.get(leg, {}).get(joint, {}).get(key, None)
@@ -125,7 +234,6 @@ class ServoCalApp:
         outer = ttk.Frame(self.tab_manual)
         outer.pack(fill="both", expand=True)
 
-        # Top controls row: global record buttons
         top = ttk.Frame(outer)
         top.pack(fill="x", side="top", padx=6, pady=6)
         ttk.Button(top, text="Set→Start (All)", command=self.record_all_to_cycle_start).pack(side="left", padx=4)
@@ -142,7 +250,6 @@ class ServoCalApp:
             frame = ttk.LabelFrame(container, text=leg, padding=10)
             frame.grid(row=row, column=col, sticky="nsew", padx=6, pady=6)
 
-            # Header row
             hdr = ttk.Frame(frame)
             hdr.pack(fill="x")
             ttk.Label(hdr, text="Joint", width=10).pack(side="left")
@@ -173,18 +280,15 @@ class ServoCalApp:
                 ttk.Combobox(rowf, textvariable=range_var, values=["180", "270"], width=5).pack(side="left", padx=6)
                 ttk.Entry(rowf, textvariable=offset_var, width=6).pack(side="left", padx=6)
 
-                # Live slider (shorter)
                 slider = ttk.Scale(
                     rowf, from_=0.0, to=270.0, orient="horizontal", length=150,
                     command=lambda _=None, l=leg, j=joint: self._on_slider(l, j)
                 )
                 slider.pack(side="left", padx=4)
 
-                # Angle entry (float)
                 angle_entry = ttk.Entry(rowf, width=7)
                 angle_entry.pack(side="left", padx=4)
 
-                # Action buttons stacked
                 btns = ttk.Frame(rowf)
                 btns.pack(side="left", padx=4)
                 ttk.Button(btns, text="Move",
@@ -197,7 +301,6 @@ class ServoCalApp:
                            command=lambda l=leg, j=joint: self._record_to_cycle_from_manual(l, j, target="end")
                            ).pack(fill="x", pady=1)
 
-                # Bind angle entry ↔ slider sync
                 def entry_commit(event, l=leg, j=joint):
                     try:
                         a = float(self.manual_vars[l][j]["angle_var"].get())
@@ -208,7 +311,6 @@ class ServoCalApp:
 
                 angle_entry.bind("<Return>", entry_commit)
 
-                # Adjust slider max when range changes
                 def on_range_change(*_ignored, l=leg, j=joint):
                     try:
                         r = int(self.manual_vars[l][j]["range_var"].get())
@@ -220,7 +322,6 @@ class ServoCalApp:
                     except:
                         pass
 
-                # Store refs
                 self.manual_vars[leg][joint] = {
                     "ch_var": ch_var,
                     "range_var": range_var,
@@ -230,7 +331,6 @@ class ServoCalApp:
                     "angle_entry": angle_entry,
                 }
 
-                # Initialize widgets
                 angle_entry.insert(0, f"{angle_val:.2f}")
                 slider.set(angle_val)
                 range_var.trace_add("write", on_range_change)
@@ -304,7 +404,6 @@ class ServoCalApp:
         for c in range(2):
             container.grid_columnconfigure(c, weight=1)
 
-        # Controls row (top): universal speed + apply/stop
         topbar = ttk.Frame(self.tab_cycle)
         topbar.pack(fill="x", side="top", padx=6, pady=6)
         ttk.Label(topbar, text="Universal Speed (°/s):").pack(side="left", padx=4)
@@ -317,7 +416,6 @@ class ServoCalApp:
             frame = ttk.LabelFrame(container, text=f"{leg} — Cycle", padding=10)
             frame.grid(row=row, column=col, sticky="nsew", padx=6, pady=6)
 
-            # Header row
             hdr = ttk.Frame(frame)
             hdr.pack(fill="x")
             ttk.Label(hdr, text="Joint", width=10).pack(side="left")
@@ -369,7 +467,7 @@ class ServoCalApp:
 
                 self.cycle_state[leg][joint] = {
                     "running": False,
-                    "direction": +1,  # +1 towards end, -1 towards start
+                    "direction": +1,
                 }
 
     # Cycle control
@@ -400,40 +498,230 @@ class ServoCalApp:
         for leg in LEGS:
             for joint in JOINTS:
                 self.stop_cycle(leg, joint)
+        for leg in LEGS:
+            self.ik_running[leg] = False
 
-    # -------- Frame-synced cycle tick --------
+    # -------- IK Tab (NEW) --------
+    def _build_ik_tab(self):
+        outer = ttk.Frame(self.tab_ik)
+        outer.pack(fill="both", expand=True)
+
+        # Top controls: universal speed + run/stop all
+        top = ttk.Frame(outer)
+        top.pack(fill="x", side="top", padx=6, pady=6)
+        ttk.Label(top, text="Universal Speed (°/s):").pack(side="left", padx=4)
+        ttk.Entry(top, textvariable=self.universal_speed, width=8).pack(side="left", padx=4)
+        ttk.Button(top, text="Run All", command=self.ik_run_all).pack(side="left", padx=6)
+        ttk.Button(top, text="Stop All", command=self.stop_all).pack(side="left", padx=6)
+
+        container = ttk.Frame(outer)
+        container.pack(fill="both", expand=True)
+        for r in range(2):
+            container.grid_rowconfigure(r, weight=1)
+        for c in range(2):
+            container.grid_columnconfigure(c, weight=1)
+
+        for leg, (row, col) in LEG_POSITIONS_2x2.items():
+            frame = ttk.LabelFrame(container, text=f"{leg} — IK Cycle", padding=10)
+            frame.grid(row=row, column=col, sticky="nsew", padx=6, pady=6)
+
+            # Header
+            hdr = ttk.Frame(frame)
+            hdr.pack(fill="x")
+            ttk.Label(hdr, text="Start [x y z r p y]").pack(side="left", padx=6)
+            ttk.Label(hdr, text="End [x y z r p y]").pack(side="left", padx=20)
+            ttk.Label(hdr, text="Steps").pack(side="left", padx=20)
+
+            row1 = ttk.Frame(frame)
+            row1.pack(fill="x", pady=4)
+
+            # Start pose entries
+            sv = [tk.DoubleVar(value=v) for v in [0, 0, 120, 0, 0, 0]]
+            for i in range(6):
+                ttk.Entry(row1, textvariable=sv[i], width=6).pack(side="left", padx=2)
+
+            # End pose entries
+            ev = [tk.DoubleVar(value=v) for v in [0, 0, 90, 0, 0, 0]]
+            for i in range(6):
+                ttk.Entry(row1, textvariable=ev[i], width=6).pack(side="left", padx=2)
+
+            steps_var = tk.IntVar(value=10)
+            ttk.Entry(row1, textvariable=steps_var, width=5).pack(side="left", padx=8)
+
+            row2 = ttk.Frame(frame)
+            row2.pack(fill="x", pady=4)
+            ttk.Button(row2, text="Start", command=lambda l=leg: self.ik_start_leg(l)).pack(side="left", padx=4)
+            ttk.Button(row2, text="Stop", command=lambda l=leg: self.ik_stop_leg(l)).pack(side="left", padx=4)
+
+            self.tab_ik_vars[leg] = {
+                "start_vars": sv,   # list of 6 DoubleVar
+                "end_vars": ev,     # list of 6 DoubleVar
+                "steps_var": steps_var
+            }
+
+    def ik_run_all(self):
+        for leg in LEGS:
+            self.ik_start_leg(leg)
+
+    def ik_start_leg(self, leg):
+        try:
+            v = self.tab_ik_vars[leg]
+            start = [var.get() for var in v["start_vars"]]
+            end   = [var.get() for var in v["end_vars"]]
+            steps = int(v["steps_var"].get())
+            pts = ik_create_points(start, end, steps)
+
+            self.ik_waypoints[leg] = pts
+            self.ik_step_index[leg] = 0
+            self.ik_direction[leg] = +1
+            self.ik_running[leg] = True
+
+            # Initialize current and target from first point
+            self._ik_update_targets_from_pose(leg, pts[0])
+            self.status_var.set(f"IK started for {leg} with {steps} steps")
+        except Exception as e:
+            self.status_var.set(f"IK start error for {leg}: {e}")
+
+    def ik_stop_leg(self, leg):
+        self.ik_running[leg] = False
+        self.status_var.set(f"IK stopped for {leg}")
+
+    # ---- IK tick helpers ----
+    def _ik_update_targets_from_pose(self, leg, pose6):
+        """Compute IK targets (deg) for this leg from a 6D pose."""
+        x, y, z, r, p, ya = pose6
+        ikname = IK_LEG_NAME[leg]
+        xh, yh, zh = ik_rotational_preprocess_xyz(ikname, x, y, z, r, p, ya, angles_in_degrees=True)
+        hip_r, low_r, up_r = ik_inverse_kinematics(ikname, xh, yh, zh)
+
+        # Convert to degrees for output layer
+        hip_d = float(np.rad2deg(hip_r))
+        thigh_d = float(np.rad2deg(low_r))   # your "lower" -> thigh
+        knee_d = float(np.rad2deg(up_r))     # your "upper" -> knee
+
+        self.ik_target_deg[leg]["Hip"] = hip_d
+        self.ik_target_deg[leg]["Thigh"] = thigh_d
+        self.ik_target_deg[leg]["Knee"] = knee_d
+
+    def _ik_advance_waypoint_if_reached(self, leg, eps=0.5):
+        """Advance to next waypoint if all joints are within eps degrees."""
+        for j in JOINTS:
+            if abs(self.ik_current_deg[leg][j] - self.ik_target_deg[leg][j]) > eps:
+                return  # not yet
+        # reached: move to next
+        idx = self.ik_step_index[leg] + self.ik_direction[leg]
+        pts = self.ik_waypoints[leg]
+        if idx >= len(pts):
+            idx = len(pts) - 2
+            self.ik_direction[leg] = -1
+        elif idx < 0:
+            idx = 1
+            self.ik_direction[leg] = +1
+        self.ik_step_index[leg] = idx
+        self._ik_update_targets_from_pose(leg, pts[idx])
+
+    def _ik_tick_compute_all(self, dt):
+        """Move current angles toward IK targets with speed limit (deg/s)."""
+        spd = abs(float(self.universal_speed.get()))
+        step_deg = spd * dt
+        for leg in LEGS:
+            if not self.ik_running[leg]:
+                continue
+            # Update logical angles toward targets
+            for j in JOINTS:
+                cur = self.ik_current_deg[leg][j]
+                tgt = self.ik_target_deg[leg][j]
+                if abs(tgt - cur) <= step_deg:
+                    self.ik_current_deg[leg][j] = tgt
+                else:
+                    self.ik_current_deg[leg][j] = cur + step_deg * np.sign(tgt - cur)
+            # Waypoint management
+            self._ik_advance_waypoint_if_reached(leg)
+
+    def _ik_tick_command_all(self):
+        """
+        Send servo commands for IK **in three passes**:
+        1) all Hips, 2) all Thighs, 3) all Knees.
+        Uses the per-leg channel/range/offset from the Manual/Cycle forms.
+        """
+        # Helper to send a single joint
+        def send_joint(leg, joint):
+            try:
+                # Source config: prefer Manual tab if present, else Cycle tab
+                if leg in self.manual_vars and joint in self.manual_vars[leg]:
+                    ch = int(self.manual_vars[leg][joint]["ch_var"].get())
+                    act_range = int(self.manual_vars[leg][joint]["range_var"].get())
+                    offset = float(self.manual_vars[leg][joint]["offset_var"].get())
+                else:
+                    ch = int(self.cycle_vars[leg][joint]["ch_var"].get())
+                    act_range = int(self.cycle_vars[leg][joint]["range_var"].get())
+                    offset = float(self.cycle_vars[leg][joint]["offset_var"].get())
+
+                logical = float(self.ik_current_deg[leg][joint])  # deg
+                actual = clamp(logical + offset, 0.0, float(act_range))
+                s = create_servo(ch, act_range)
+                s.angle = actual
+
+                # keep manual slider in sync
+                if leg in self.manual_vars and joint in self.manual_vars[leg]:
+                    self.manual_vars[leg][joint]["angle_var"].set(logical)
+                    self._set_slider_from_angle(leg, joint, logical)
+            except Exception as e:
+                self.status_var.set(f"IK cmd error {leg}-{joint}: {e}")
+
+        # Pass 1: Hips
+        for leg in LEGS:
+            if self.ik_running[leg]:
+                send_joint(leg, "Hip")
+        # Pass 2: Thighs
+        for leg in LEGS:
+            if self.ik_running[leg]:
+                send_joint(leg, "Thigh")
+        # Pass 3: Knees
+        for leg in LEGS:
+            if self.ik_running[leg]:
+                send_joint(leg, "Knee")
+
+    # -------- Frame-synced update loop (both Cycle + IK) --------
+    def _schedule_tick(self):
+        now = time.time()
+        dt = max(0.0, now - self.last_cycle_ts)
+        self.last_cycle_ts = now
+
+        # Legacy cycle: compute then command (together per frame)
+        self._cycle_tick_compute_all(dt)
+        self._cycle_tick_command_all()
+
+        # IK: compute toward targets, then command in 3 passes
+        self._ik_tick_compute_all(dt)
+        self._ik_tick_command_all()
+
+        self.root.after(30, self._schedule_tick)
+
     def _cycle_tick_compute_all(self, dt):
-        """Compute next logical angles for all running joints (no hardware I/O here)."""
         spd = abs(float(self.universal_speed.get()))
         for leg in LEGS:
             for joint in JOINTS:
                 if not self.cycle_state[leg][joint]["running"]:
                     continue
-
                 vars_j = self.cycle_vars[leg][joint]
                 start_a = float(vars_j["start_var"].get())
                 end_a = float(vars_j["end_var"].get())
                 lo, hi = (start_a, end_a) if start_a <= end_a else (end_a, start_a)
-
                 cur = float(vars_j["current_angle"])
                 dirn = self.cycle_state[leg][joint]["direction"]
                 step = spd * dt * dirn
                 nxt = cur + step
-
-                # bounce at bounds
                 if nxt > hi:
                     nxt = hi
                     dirn = -1
                 elif nxt < lo:
                     nxt = lo
                     dirn = +1
-
-                # store updates only (no commands yet)
                 self.cycle_state[leg][joint]["direction"] = dirn
                 vars_j["current_angle"] = nxt
 
     def _cycle_tick_command_all(self):
-        """Send all servo commands together for this frame."""
         for leg in LEGS:
             for joint in JOINTS:
                 if not self.cycle_state[leg][joint]["running"]:
@@ -448,7 +736,6 @@ class ServoCalApp:
                     s = create_servo(ch, act_range)
                     s.angle = actual
 
-                    # Keep manual tab in sync visually
                     if leg in self.manual_vars and joint in self.manual_vars[leg]:
                         self.manual_vars[leg][joint]["angle_var"].set(logical)
                         self._set_slider_from_angle(leg, joint, logical)
@@ -456,25 +743,12 @@ class ServoCalApp:
                     self.status_var.set(f"Cycle command error {leg}-{joint}: {e}")
                     self.cycle_state[leg][joint]["running"] = False
 
-    def _schedule_cycle_tick(self):
-        now = time.time()
-        dt = max(0.0, now - self.last_cycle_ts)
-        self.last_cycle_ts = now
-
-        # First pass: compute all updates
-        self._cycle_tick_compute_all(dt)
-        # Second pass: command all at once
-        self._cycle_tick_command_all()
-
-        self.root.after(30, self._schedule_cycle_tick)
-
     # ---------- Save / Close ----------
     def on_save(self):
         data = {}
         for leg in LEGS:
             data[leg] = {}
             for joint in JOINTS:
-                # manual fields
                 if leg in self.manual_vars and joint in self.manual_vars[leg]:
                     mv = self.manual_vars[leg][joint]
                     ch = mv["ch_var"].get()
@@ -488,7 +762,6 @@ class ServoCalApp:
                     rng = self.cycle_vars[leg][joint]["range_var"].get()
                     off = self.cycle_vars[leg][joint]["offset_var"].get()
 
-                # cycle params
                 cv = self.cycle_vars[leg][joint]
                 start_a = cv["start_var"].get()
                 end_a = cv["end_var"].get()
@@ -500,7 +773,7 @@ class ServoCalApp:
                     "offset": off,
                     "start": start_a,
                     "end": end_a,
-                    "speed": f"{self.universal_speed.get():.2f}",  # persisted once, read as universal
+                    "speed": f"{self.universal_speed.get():.2f}",
                 }
 
         save_config(data)
