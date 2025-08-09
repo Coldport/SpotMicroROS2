@@ -1,6 +1,5 @@
 import numpy as np
 import threading
-
 class DOG:
     """
     A class to represent the DOG robot.
@@ -31,8 +30,6 @@ class DOG:
             raise ValueError(f"leg_name '{leg_name}' must be one of {list(self.legs.keys())}")
         return self.legs[leg_name]
 
-
-
     def set_leg_angles(self, leg_name, hip_angle, lower_angle, upper_angle):
         """
         Set the joint angles for a specific leg.
@@ -62,7 +59,6 @@ class DOG:
         return self.__str__()
 
 
-
 class Leg:
     """
     A class to represent a leg of the DOG robot.
@@ -79,12 +75,13 @@ class Leg:
     HIP_TO_LEG_DISTANCE = 40.0
     LEG_WIDTH = 80.0
     
-    # Default hip offsets for rotational preprocessing
-    DEFAULT_HIP_OFFSETS = {
-        "FL": np.array([+93.0, +34.5, 0.0]),
-        "FR": np.array([+93.0, -34.5, 0.0]),
-        "RL": np.array([-93.0, +34.5, 0.0]),
-        "RR": np.array([-93.0, -34.5, 0.0]),
+    # Hip offsets from body center to each hip joint
+    # These represent the physical mounting positions of the hip joints
+    HIP_OFFSETS = {
+        "FL": np.array([+93.0, +40.0, 0.0]),  # Front Left: +X, +Y
+        "FR": np.array([+93.0, -40.0, 0.0]),  # Front Right: +X, -Y  
+        "RL": np.array([-93.0, +40.0, 0.0]),  # Rear Left: -X, +Y
+        "RR": np.array([-93.0, -40.0, 0.0]),  # Rear Right: -X, -Y
     }
 
     def __init__(self, leg_name, enabled=True):
@@ -118,168 +115,131 @@ class Leg:
         self.lower_angle = self._safe_lower_angle
         self.upper_angle = self._safe_upper_angle
 
-        # Calculate leg offset based on position
-        self.leg_offset = self._calculate_leg_offset()
-
+        # Store current calculated angles
         self.current_angles = (self.hip_angle, self.lower_angle, self.upper_angle)
 
-    def _calculate_leg_offset(self):
-        """Calculate the offset vector for this leg based on its name."""
-        half_leg_distance = self.LEG_TO_LEG_DISTANCE / 2
-        leg_center_offset = self.LEG_CENTER_TO_LEG_DISTANCE / 2
-        
-        offset_map = {
-            "FL": np.array([ half_leg_distance, leg_center_offset, 0.0]),
-            "FR": np.array([ half_leg_distance, -leg_center_offset, 0.0]),
-            "RL": np.array([-half_leg_distance, leg_center_offset, 0.0]),
-            "RR": np.array([-half_leg_distance, -leg_center_offset, 0.0]),
-        }
-        
-        return offset_map[self.leg_name]
-
-    def inverse_kinematics(self, X,Y,Z):
+    def inverse_kinematics(self, X, Y, Z):
         """
         Calculate the inverse kinematics for the leg based on the given coordinates.
+        These coordinates should be in the HIP frame (relative to the hip joint).
         
         Args:
-            x (float): X coordinate
-            y (float): Y coordinate
-            z (float): Z coordinate
+            X (float): X coordinate in hip frame
+            Y (float): Y coordinate in hip frame  
+            Z (float): Z coordinate in hip frame
             
         Returns:
             tuple: (hip_angle, lower_angle, upper_angle) in radians
-        X = X - self.leg_offset[0]  # Adjust X by leg offset
-        Y = Y - self.leg_offset[1]  # Adjust Y by leg offset
-        Z = Z - self.leg_offset[2]
         """
-        #X = X - self.leg_offset[0]  # Adjust X by leg offset
-        #print("X after offset:", X)
-        Y = Y + 40  # Adjust Y by leg offset
-
-        #Z = Z - self.leg_offset[2]  # Adjust Z by leg offset
-        #print("Z after offset:", Z)
+        # This matches your original working IK exactly
+        # Adjust Y by adding the 40mm hip offset
+        Y_adjusted = Y + 40
+        
         # Calculate intermediate distances
-        D= np.sqrt((Y**2) +(Z**2)-1600)
-        G = np.sqrt((D**2)+(X**2))
+        D = np.sqrt(Y_adjusted**2 + Z**2 - 1600)  # 40^2 = 1600
+        G = np.sqrt(D**2 + X**2)
 
-        Hip_angle = np.arctan2(Z,Y) + np.arctan2(40, G)
-        lower_angle = np.arccos(((G**2) - 28800)/-28800)
-        upper_angle = np.arctan2(D,X) - np.arcsin((120*np.sin(lower_angle))/G)
-
+        # Calculate joint angles
+        hip_angle = np.arctan2(Z, Y_adjusted) + np.arctan2(40, D)
+        lower_angle = np.arccos((G**2 - 28800) / (-28800))  # 2 * 120^2 = 28800
+        upper_angle = np.arctan2(D, X) - np.arcsin((120 * np.sin(lower_angle)) / G)
 
         # Apply angle conversion for right legs
         if self.from_180:
             lower_angle = np.pi - lower_angle
             upper_angle = np.pi - upper_angle
+            
+        self.current_angles = (hip_angle, lower_angle, upper_angle)
+        return hip_angle, lower_angle, upper_angle
 
-        return (Hip_angle, lower_angle, upper_angle)
-    
-    def rotational_preprocess_xyz(self, x, y, z, roll, pitch, yaw, 
-                                 hip_offsets=None, angles_in_degrees=True):
+
+    def rotational_preprocess_xyz(self, X, Y, Z, roll, pitch, yaw, angles_in_degrees=True):
         """
-        Convert a nominal BODY-frame foot target (x,y,z) into the HIP frame,
+        Convert a BODY-frame foot target (x,y,z) into the HIP frame of this leg,
         after applying a body orientation (roll, pitch, yaw).
         
         Args:
-            x, y, z (float): Foot target in BODY frame at zero pose
-            roll, pitch, yaw (float): Body orientation about BODY axes (X,Y,Z)
-            hip_offsets (dict, optional): Custom hip offset mapping
-            angles_in_degrees (bool): If True, roll/pitch/yaw are in degrees
+            x, y, z (float): Foot target in BODY frame
+            roll, pitch, yaw (float): Body orientation angles
+            angles_in_degrees (bool): If True, angles are in degrees
             
         Returns:
-            tuple: (x_hip, y_hip, z_hip) in hip frame coordinates
+            tuple: (x_hip, y_hip, z_hip) coordinates in hip frame
         """
-        if hip_offsets is None:
-            hip_offsets = self.DEFAULT_HIP_OFFSETS
+        roll_rad = np.deg2rad(roll)
+        pitch_rad = np.deg2rad(pitch)
+        yaw_rad = np.deg2rad(yaw)
 
-        if self.leg_name not in hip_offsets:
-            raise ValueError(f"leg_name '{self.leg_name}' not in hip_offsets")
+        z_off = 93 *  np.sin(pitch_rad)
+        #print(f"z_off: {z_off}")
 
-        # Convert angles to radians if needed
-        if angles_in_degrees:
-            roll = np.deg2rad(roll)
-            pitch = np.deg2rad(pitch)
-            yaw = np.deg2rad(yaw)
-
-        # Create rotation matrices
-        rotation_matrix = self._create_rotation_matrix(roll, pitch, yaw)
-
-        # Transform the target point
-        body_point = np.array([x, y, z], dtype=float)
-        rotated_point = rotation_matrix.T @ body_point
+        #pitch
+        if self.leg_name in ["FL", "FR"]:
+            new_Z1 = Z + z_off
+        else:
+            new_Z1 = Z - z_off
         
-        # Transform to hip frame
-        hip_offset = hip_offsets[self.leg_name]
-        hip_point = rotated_point - hip_offset
+        #roll 
+        y_off = new_Z1 * np.sin(roll_rad)
+        #print(f"y_off: {y_off}")
+        if self.leg_name in ["FL", "RL"]:
+            new_Y2 = Y + y_off
+        else:
+            new_Y2 = Y - y_off
 
-        return float(hip_point[0]), float(hip_point[1]), float(hip_point[2])
+        #yaw
+        Xoff = 43.5 * np.sin(yaw_rad)
+        #Yoff = 93 * np.sin(yaw_rad)
+        #print(f"Xoff: {Xoff}, Yoff: {Yoff}")
+        if self.leg_name in ["FL", "FR"]:
+            new_X = X + Xoff
+            
+        else:
+            new_X = X - Xoff
+            
+
+        return float(new_X), float(new_Y2), float(new_Z1)
 
     def create_points(self, start, end, steps):
         """
-        Create a list of points forming a straight line between two 3D coordinates.
+        Create a list of points forming a straight line between two 6D poses.
+        Each point contains [x, y, z, roll, pitch, yaw].
 
         Args:
-            start (sequence of 3): [x1, y1, z1]
-            end   (sequence of 3): [x2, y2, z2]
-            steps (int): number of segments between start and end (>=1).
-                        The function returns steps+1 points (inclusive of endpoints).
+            start (sequence of 6): [x1, y1, z1, roll1, pitch1, yaw1]
+            end   (sequence of 6): [x2, y2, z2, roll2, pitch2, yaw2]  
+            steps (int): number of segments (>=1). Returns steps+1 points.
 
         Returns:
-            list[list[float]]: points along the line from start to end.
+            list[list[float]]: interpolated points from start to end
         """
         if steps < 1:
             raise ValueError("steps must be >= 1")
+        if len(start) != 6 or len(end) != 6:
+            raise ValueError("start and end must have 6 elements [x,y,z,roll,pitch,yaw]")
 
-        x1, y1, z1 = start
-        x2, y2, z2 = end
+        x1, y1, z1, r1, p1, ya1 = start
+        x2, y2, z2, r2, p2, ya2 = end
 
         points = []
         for i in range(steps + 1):  # include both endpoints
-            t = i / steps           # 0.0 .. 1.0
+            t = i / steps  # 0.0 to 1.0
             x = x1 + t * (x2 - x1)
             y = y1 + t * (y2 - y1)
             z = z1 + t * (z2 - z1)
-            points.append([x, y, z])
+            r = r1 + t * (r2 - r1)
+            p = p1 + t * (p2 - p1)
+            ya = ya1 + t * (ya2 - ya1)
+            points.append([x, y, z, r, p, ya])
         return points
 
-
-    @staticmethod
-    def _create_rotation_matrix(roll, pitch, yaw):
-        """
-        Create a rotation matrix from roll, pitch, yaw angles (Z-Y-X convention).
-        
-        Args:
-            roll, pitch, yaw (float): Rotation angles in radians
-            
-        Returns:
-            numpy.ndarray: 3x3 rotation matrix
-        """
-        # Roll (X-axis rotation)
-        cr, sr = np.cos(roll), np.sin(roll)
-        rx = np.array([[1, 0, 0],
-                       [0, cr, -sr],
-                       [0, sr, cr]])
-
-        # Pitch (Y-axis rotation)
-        cp, sp = np.cos(pitch), np.sin(pitch)
-        ry = np.array([[cp, 0, sp],
-                       [0, 1, 0],
-                       [-sp, 0, cp]])
-
-        # Yaw (Z-axis rotation)
-        cy, sy = np.cos(yaw), np.sin(yaw)
-        rz = np.array([[cy, -sy, 0],
-                       [sy, cy, 0],
-                       [0, 0, 1]])
-
-        # Combined rotation (Z-Y-X order)
-        return rz @ ry @ rx
 
     def reset_to_safe_position(self):
         """Reset all joint angles to safe default positions."""
         self.hip_angle = self._safe_hip_angle
         self.lower_angle = self._safe_lower_angle
         self.upper_angle = self._safe_upper_angle
+        self.current_angles = (self.hip_angle, self.lower_angle, self.upper_angle)
 
     def set_angles(self, hip_angle, lower_angle, upper_angle):
         """
@@ -293,6 +253,7 @@ class Leg:
         self.hip_angle = hip_angle
         self.lower_angle = lower_angle
         self.upper_angle = upper_angle
+        self.current_angles = (hip_angle, lower_angle, upper_angle)
 
     def __str__(self):
         """String representation of the leg."""
@@ -303,40 +264,37 @@ class Leg:
     def __repr__(self):
         """Detailed string representation of the leg."""
         return self.__str__()
-
-
+    
+    
 
 def main():
-    fl_leg = Leg("FL")
+
+    print("-" * 40)
+    leg1 = Leg("FR")
+    leg2 = Leg("FR")
+    leg3 = Leg("RL")
+    leg4 = Leg("RR")
+
+    print("Test Trajectory interpolation")
     
-    # Test parameters
-    x, y, z = 0, 0, 120
-    x2, y2, z2= 0, 0, 120
-    start_point = [x, y, z]
-    end_point = [x2, y2, z2]
-    steps = 10
-    roll1, pitch1, yaw1 = 0, 0, 0
-    roll2, pitch2, yaw2 = 0, -0, 0
+    start_pose = [0, 0, 120, -10, 0, 0]    # Start: foot below, no rotation
+    end_pose = [0, 0, 90, -10, 0, 0]   # End: foot forward/right, slight yaw
+    steps = 6
+    
+    print(f"Interpolating from {start_pose} to {end_pose} in {steps} steps:")
 
-    LEG = Leg("FL")
-    #print("Initial Leg State:", LEG)
-    points = LEG.create_points(start_point, end_point, steps)
-    for point in points:
-        x, y, z = point
-        hip_angle, lower_angle, upper_angle = LEG.inverse_kinematics(x, y, z)
-        print(f"Point: ({x:.2f}, {y:.2f}, {z:.2f}) -> "
-              f"Hip: {np.rad2deg(hip_angle):.2f}°, "
-              f"Lower: {np.rad2deg(lower_angle):.2f}°, "
-              f"Upper: {np.rad2deg(upper_angle):.2f}°")
-        LEG.set_angles(np.rad2deg(hip_angle), np.rad2deg(lower_angle), np.rad2deg(upper_angle))
-        #print("Updated Leg State:", LEG)
-    print("-" * 60)    
-    LEG.reset_to_safe_position()
-    print("Reset Leg State:", LEG)
-    print("-" * 60)
-    print("Testing rotational preprocessing:")
-    # Test inverse kinematics
+    trajectory = leg1.create_points(start_pose, end_pose, steps)
+    for i, point in enumerate(trajectory):
+        x, y, z, roll, pitch, yaw = point
+        x_hip, y_hip, z_hip = leg1.rotational_preprocess_xyz(x, y, z, roll, pitch, yaw)
+        hip_angle, lower_angle, upper_angle = leg1.inverse_kinematics(x_hip, y_hip, z_hip)
 
+        print(f"  Step {i}: body=({x:.1f},{y:.1f},{z:.1f}) rot=({roll:.1f}, {pitch:.1f}, {yaw:.1f}) "
+              f"-> angles=({np.rad2deg(hip_angle):.1f}, {np.rad2deg(lower_angle):.1f}, {np.rad2deg(upper_angle):.1f})°")
+    
+    # Test 4: All legs comparison
+    print("\n" + "-" * 40)
+    
 
 
 if __name__ == "__main__":
