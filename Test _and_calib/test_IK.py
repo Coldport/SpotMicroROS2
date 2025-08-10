@@ -125,6 +125,8 @@ class Leg:
         # Store current calculated angles
         self.current_angles = (self.hip_angle, self.lower_angle, self.upper_angle)
 
+        self.servos = self.Create_servo_driver()
+
     def inverse_kinematics(self, X, Y, Z):
         """
         Calculate the inverse kinematics for the leg based on the given coordinates.
@@ -157,10 +159,10 @@ class Leg:
 
         elif self.leg_name in ["FL"]:
 
-            hip_angle = np.arctan2(Z, Y_adjusted) + np.arctan2(40, D) + np.pi/4
+            hip_angle = np.arctan2(Z, Y_adjusted) + np.arctan2(40, D) #+ np.pi/4
             lower_angle = np.arccos((G**2 - 28800) / (-28800))  # 2 * 120^2 = 28800
             upper_angle = np.arctan2(D, X) - np.arcsin((120 * np.sin(lower_angle)) / G)
-            upper_angle = np.pi/2  - upper_angle + np.pi/4
+            upper_angle = np.pi/2  - upper_angle 
             lower_angle = lower_angle  
 
         
@@ -254,6 +256,107 @@ class Leg:
             ya = ya1 + t * (ya2 - ya1)
             points.append([x, y, z, r, p, ya])
         return points
+    
+    def Move_To_L(self,point):
+        #filler
+        x, y, z, roll, pitch, yaw = point
+        Xh,Yh,Zh =self.rotational_preprocess_xyz(x, y, z, roll, pitch, yaw)
+        H_ang, Th_ang , An_ang =self.inverse_kinematics(Xh,Yh,Zh)
+        if self.leg_name in ["RL"]:
+            self.servos[0].angle = np.rad2deg(H_ang)
+            self.servos[2].angle = np.rad2deg(Th_ang)
+            self.servos[1].angle = np.rad2deg(An_ang)
+        elif self.leg_name in ["FL"]:
+            self.servos[15].angle = np.rad2deg(H_ang)
+            self.servos[13].angle = np.rad2deg(Th_ang)
+            self.servos[14].angle = np.rad2deg(An_ang)
+
+    def Create_servo_driver(self):
+        i2c = board.I2C()  # uses board.SCL and board.SDA
+        pca = PCA9685(i2c)
+        pca.frequency = 50
+        servos = [
+        servo.Servo(pca.channels[0],
+                min_pulse=500,
+                max_pulse=2500,
+                actuation_range=270
+            ),
+        servo.Servo(pca.channels[1],
+                min_pulse=500,
+                max_pulse=2500,
+                actuation_range=270
+            ),
+        servo.Servo(pca.channels[2],
+                min_pulse=500,
+                max_pulse=2500,
+                actuation_range=270
+            ),
+        servo.Servo(pca.channels[3],
+                min_pulse=500,
+                max_pulse=2500,
+                actuation_range=270
+            ),
+        servo.Servo(pca.channels[4],
+                min_pulse=500,
+                max_pulse=2500,
+                actuation_range=270
+            ),
+        servo.Servo(pca.channels[5],
+                min_pulse=500,
+                max_pulse=2500,
+                actuation_range=270
+            ),
+        servo.Servo(pca.channels[6],
+                min_pulse=500,
+                max_pulse=2500,
+                actuation_range=270
+            ),
+        servo.Servo(pca.channels[7],
+                min_pulse=500,
+                max_pulse=2500,
+                actuation_range=270
+            ),
+        servo.Servo(pca.channels[8],
+                min_pulse=500,
+                max_pulse=2500,
+                actuation_range=270
+            ),
+        servo.Servo(pca.channels[9],
+                min_pulse=500,
+                max_pulse=2500,
+                actuation_range=270
+            ),
+        servo.Servo(pca.channels[10],
+                min_pulse=500,
+                max_pulse=2500,
+                actuation_range=270
+            ),
+        servo.Servo(pca.channels[11],
+                min_pulse=500,
+                max_pulse=2500,
+                actuation_range=270
+            ),
+        servo.Servo(pca.channels[12],
+                min_pulse=500,
+                max_pulse=2500,
+                actuation_range=270
+            ),
+        servo.Servo(pca.channels[13],
+                min_pulse=500,
+                max_pulse=2500,
+                actuation_range=270
+            ),
+        servo.Servo(pca.channels[14],
+                min_pulse=500,
+                max_pulse=2500,
+                actuation_range=180
+            ),
+        servo.Servo(pca.channels[15],
+                min_pulse=500,
+                max_pulse=2500,
+                actuation_range=180
+            )]
+        return servos
 
 
     def reset_to_safe_position(self):
@@ -291,70 +394,66 @@ class Leg:
 
 def main():
 
-    i2c = board.I2C()  # uses board.SCL and board.SDA
-    pca = PCA9685(i2c)
-    pca.frequency = 50
-    servo0 = servo.Servo(pca.channels[15],
-            min_pulse=500,
-            max_pulse=2500,
-            actuation_range=270
-        )
-    servo1 = servo.Servo(pca.channels[14],
-            min_pulse=500,
-            max_pulse=2500,
-            actuation_range=270
-        )
-    servo2 = servo.Servo(pca.channels[13],
-            min_pulse=500,
-            max_pulse=2500,
-            actuation_range=270
-        )
 
 
     print("-" * 40)
     leg1 = Leg("FL")
-    leg2 = Leg("FR")
+    leg2 = Leg("RL")
     leg3 = Leg("RL")
     leg4 = Leg("RR")
 
     print("Test Trajectory interpolation")
     
-    start_pose = [0, 0, 150, 0, 0, 20]    # Start: foot below, no rotation
-    end_pose = [0, 0, 150, 0, 0, -20]   # End: foot forward/right, slight yaw
-    steps = 30
+    start_pose = [0, 0, 200, 20, 0, 0]    # Start: foot below, no rotation
+    end_pose = [0, 0, 200, -20, 0, 0]   # End: foot forward/right, slight yaw
+    steps = 10
     
     print(f"Interpolating from {start_pose} to {end_pose} in {steps} steps:")
 
-    trajectory = leg1.create_points(start_pose, end_pose, steps)
-    for i, point in enumerate(trajectory):
-        x, y, z, roll, pitch, yaw = point
-        x_hip, y_hip, z_hip = leg1.rotational_preprocess_xyz(x, y, z, roll, pitch, yaw)
-        hip_angle, lower_angle, upper_angle = leg1.inverse_kinematics(x_hip, y_hip, z_hip)
+    try:
+        while True:
+            
 
-        print(f"  Step {i}: body=({x:.1f},{y:.1f},{z:.1f}) rot=({roll:.1f}, {pitch:.1f}, {yaw:.1f}) "
-              f"-> angles=({np.rad2deg(hip_angle):.1f}, {np.rad2deg(lower_angle):.1f}, {np.rad2deg(upper_angle):.1f})°")
-        
-        servo0.angle = np.rad2deg(hip_angle)
-        servo1.angle = np.rad2deg(upper_angle)
-        servo2.angle = np.rad2deg(lower_angle)
-        time.sleep(0.051)
+            # 1. start_pose → end_pose
+            trajectory = leg1.create_points(start_pose, end_pose, steps)
+            for point in trajectory:
+                leg1.Move_To_L(point)
+                leg2.Move_To_L(point)
+                time.sleep(0.051)
 
-    trajectory = leg1.create_points( end_pose,start_pose, steps)
-    for i, point in enumerate(trajectory):
-        x, y, z, roll, pitch, yaw = point
-        x_hip, y_hip, z_hip = leg1.rotational_preprocess_xyz(x, y, z, roll, pitch, yaw)
-        hip_angle, lower_angle, upper_angle = leg1.inverse_kinematics(x_hip, y_hip, z_hip)
+            # 2. end_pose → start_pose
+            trajectory = leg1.create_points(end_pose, start_pose, steps)
+            for point in trajectory:
+                leg1.Move_To_L(point)
+                leg2.Move_To_L(point)
+                time.sleep(0.051)
 
-        print(f"  Step {i}: body=({x:.1f},{y:.1f},{z:.1f}) rot=({roll:.1f}, {pitch:.1f}, {yaw:.1f}) "
-              f"-> angles=({np.rad2deg(hip_angle):.1f}, {np.rad2deg(lower_angle):.1f}, {np.rad2deg(upper_angle):.1f})°")
-        
-        servo0.angle = np.rad2deg(hip_angle)
-        servo1.angle = np.rad2deg(upper_angle)
-        servo2.angle = np.rad2deg(lower_angle)
-        time.sleep(0.051)
-    
-    # Test 4: All legs comparison
-    print("\n" + "-" * 40)
+            # 3. start_pose → [50, 0, 100, 0, 0, 0]
+            trajectory = leg1.create_points(start_pose, [50, 0, 100, 0, 0, 0], steps)
+            for point in trajectory:
+                leg1.Move_To_L(point)
+                leg2.Move_To_L(point)
+                time.sleep(0.051)
+
+            # 4. [50, 0, 100, 0, 0, 0] → [-50, 0, 100, 0, 0, 0]
+            trajectory = leg1.create_points([50, 0, 100, 0, 0, 0], [-50, 0, 100, 0, 0, 0], steps)
+            for point in trajectory:
+                leg1.Move_To_L(point)
+                leg2.Move_To_L(point)
+                time.sleep(0.051)
+
+            # 5. [-50, 0, 100, 0, 0, 0] → start_pose
+            trajectory = leg1.create_points([-50, 0, 100, 0, 0, 0], start_pose, steps)
+            for point in trajectory:
+                leg1.Move_To_L(point)
+                leg2.Move_To_L(point)
+                time.sleep(0.051)
+
+            print("\n" + "-" * 40)
+
+    except KeyboardInterrupt:
+        print("\nLoop interrupted by Ctrl+C")
+
     
 
 
