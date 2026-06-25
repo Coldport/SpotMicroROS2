@@ -1,0 +1,240 @@
+<?xml version="1.0"?>
+<!--
+  SpotMicro URDF
+  Geometry source: mike4192/spotMicro  (MIT License)
+  Mesh files:      spot_micro_description/meshes/
+
+  All parameters are driven from  config/spot_micro_config.yaml.
+  If you change dimensions in the YAML, re-run  gen_urdf.py  to regenerate this file.
+
+  Joint names used here must match  joint_names  in the YAML exactly so that
+  ROS2 JointState messages from spot_micro_ik.py map correctly.
+
+  Joint order per leg:  shoulder (x-axis) → leg (y-axis) → foot (y-axis) → toe (fixed)
+  Leg position order:   rear_right, front_right, front_left, rear_left
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="spot_micro">
+
+  <!-- ── Materials ──────────────────────────────────────────────────────────── -->
+  <material name="yellow"><color rgba="0.92 0.83 0.0 1"/></material>
+  <material name="black"> <color rgba="0.10 0.10 0.1 1"/></material>
+  <material name="grey">  <color rgba="0.60 0.60 0.6 1"/></material>
+
+  <!-- ── Parameters (edit config/spot_micro_config.yaml, not here) ─────────── -->
+  <xacro:property name="body_length"       value="0.140" />
+  <xacro:property name="body_width"        value="0.110" />
+  <xacro:property name="body_height"       value="0.070" />
+
+  <xacro:property name="shoulder_length"   value="0.044" />
+  <xacro:property name="shoulder_width"    value="0.038" />
+
+  <xacro:property name="leg_length"        value="0.1075"/>
+  <xacro:property name="foot_length"       value="0.130" />
+
+  <xacro:property name="toe_radius"        value="0.020" />
+
+  <!-- Leg mount offsets from body centre -->
+  <xacro:property name="mount_x"           value="0.093" />  <!-- ±front/rear -->
+  <xacro:property name="mount_y"           value="0.039" />  <!-- ±left/right -->
+  <!-- Hip abduction link length (=hip_length in IK config) -->
+  <xacro:property name="hip_offset"        value="0.055" />
+
+  <!-- ── Macros ──────────────────────────────────────────────────────────────── -->
+
+  <xacro:macro name="shoulder_link" params="name mesh_file origin_xyz origin_rpy">
+    <link name="${name}">
+      <visual>
+        <geometry><mesh filename="package://spot_micro_description/meshes/${mesh_file}" scale="0.001 0.001 0.001"/></geometry>
+        <origin xyz="${origin_xyz}" rpy="${origin_rpy}"/>
+        <material name="black"/>
+      </visual>
+      <collision>
+        <geometry><box size="${shoulder_length} ${shoulder_width} ${body_height}"/></geometry>
+        <origin rpy="0 0 0" xyz="0 0 0"/>
+      </collision>
+      <inertial><mass value="0.10"/><inertia ixx="1e-3" ixy="0" ixz="0" iyy="1e-3" iyz="0" izz="1e-3"/></inertial>
+    </link>
+  </xacro:macro>
+
+  <xacro:macro name="leg_link" params="name mesh_file origin_xyz origin_rpy">
+    <link name="${name}_cover">
+      <visual>
+        <geometry><mesh filename="package://spot_micro_description/meshes/${mesh_file}_cover.stl" scale="0.001 0.001 0.001"/></geometry>
+        <origin xyz="${origin_xyz}" rpy="${origin_rpy}"/>
+        <material name="yellow"/>
+      </visual>
+    </link>
+    <link name="${name}">
+      <visual>
+        <geometry><mesh filename="package://spot_micro_description/meshes/${mesh_file}.stl" scale="0.001 0.001 0.001"/></geometry>
+        <origin xyz="${origin_xyz}" rpy="${origin_rpy}"/>
+        <material name="black"/>
+      </visual>
+      <collision>
+        <origin rpy="0 0 0" xyz="0 0 -0.050"/>
+        <geometry><box size="0.028 0.036 ${leg_length}"/></geometry>
+      </collision>
+      <inertial><mass value="0.15"/><inertia ixx="1e-3" ixy="0" ixz="0" iyy="1e-3" iyz="0" izz="1e-3"/></inertial>
+    </link>
+  </xacro:macro>
+
+  <xacro:macro name="foot_link" params="name mesh_file origin_xyz origin_rpy">
+    <link name="${name}">
+      <visual>
+        <geometry><mesh filename="package://spot_micro_description/meshes/${mesh_file}" scale="0.001 0.001 0.001"/></geometry>
+        <origin xyz="${origin_xyz}" rpy="${origin_rpy}"/>
+        <material name="black"/>
+      </visual>
+      <collision>
+        <geometry><box size="0.026 0.020 ${foot_length}"/></geometry>
+        <origin rpy="0 0 0" xyz="0 0 -0.050"/>
+      </collision>
+      <inertial><mass value="0.10"/><inertia ixx="1e-3" ixy="0" ixz="0" iyy="1e-3" iyz="0" izz="1e-3"/></inertial>
+    </link>
+  </xacro:macro>
+
+  <xacro:macro name="toe_link" params="name">
+    <link name="${name}">
+      <visual>
+        <geometry><mesh filename="package://spot_micro_description/meshes/foot.stl" scale="0.001 0.001 0.001"/></geometry>
+        <origin rpy="0 -0.40010 3.14159" xyz="0.00 0.01 0.015"/>
+        <material name="grey"/>
+      </visual>
+      <collision>
+        <geometry><sphere radius="${toe_radius}"/></geometry>
+        <origin rpy="0 0 0" xyz="0 0 ${toe_radius}"/>
+        <contact_coefficients mu="1.1"/>
+      </collision>
+      <inertial><mass value="0.05"/><inertia ixx="1e-4" ixy="0" ixz="0" iyy="1e-4" iyz="0" izz="1e-4"/></inertial>
+    </link>
+  </xacro:macro>
+
+  <!-- Full leg assembly macro -->
+  <xacro:macro name="full_leg" params="prefix sx sy hip_sign left arm_mesh shoulder_mesh foot_mesh arm_ox arm_oy sh_ox sh_oy">
+    <!-- Links -->
+    <xacro:shoulder_link name="${prefix}_shoulder_link"
+      mesh_file="${shoulder_mesh}"
+      origin_xyz="${sh_ox} ${sh_oy} -0.01"
+      origin_rpy="0 0 3.14159"/>
+
+    <xacro:leg_link name="${prefix}_leg_link"
+      mesh_file="${arm_mesh}"
+      origin_xyz="${arm_ox} ${arm_oy} -0.025"
+      origin_rpy="0 -0.139 3.14159"/>
+
+    <xacro:foot_link name="${prefix}_foot_link"
+      mesh_file="${foot_mesh}"
+      origin_xyz="${arm_ox} ${arm_oy} 0.1"
+      origin_rpy="0 0 3.14159"/>
+
+    <xacro:toe_link name="${prefix}_toe_link"/>
+
+    <!-- Joints -->
+    <joint name="${prefix}_shoulder" type="revolute">
+      <parent link="base_link"/>
+      <child  link="${prefix}_shoulder_link"/>
+      <axis xyz="1 0 0"/>
+      <origin rpy="0 0 0" xyz="${sx} ${sy} 0"/>
+      <limit effort="1000.0" lower="-0.548" upper="0.548" velocity="0.7"/>
+      <dynamics damping="0.0" friction="0.5"/>
+    </joint>
+
+    <joint name="${prefix}_leg" type="revolute">
+      <parent link="${prefix}_shoulder_link"/>
+      <child  link="${prefix}_leg_link"/>
+      <axis xyz="0 1 0"/>
+      <origin rpy="0 0 0" xyz="0 ${hip_sign*hip_offset} 0"/>
+      <limit effort="1000.0" lower="-2.666" upper="1.548" velocity="0.5"/>
+      <dynamics damping="0.0" friction="0.0"/>
+    </joint>
+
+    <joint name="${prefix}_leg_cover_joint" type="fixed">
+      <parent link="${prefix}_leg_link"/>
+      <child  link="${prefix}_leg_link_cover"/>
+      <origin xyz="0 0 0"/>
+    </joint>
+
+    <joint name="${prefix}_foot" type="revolute">
+      <parent link="${prefix}_leg_link"/>
+      <child  link="${prefix}_foot_link"/>
+      <axis xyz="0 1 0"/>
+      <origin rpy="0 0 0" xyz="0 0 -${leg_length}"/>
+      <limit effort="1000.0" lower="-2.6" upper="0.1" velocity="0.5"/>
+      <dynamics damping="0.0" friction="0.5"/>
+    </joint>
+
+    <joint name="${prefix}_toe" type="fixed">
+      <parent link="${prefix}_foot_link"/>
+      <child  link="${prefix}_toe_link"/>
+      <origin xyz="0 0 -${foot_length}"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- ── Body ───────────────────────────────────────────────────────────────── -->
+
+  <link name="base_link">
+    <visual>
+      <geometry><mesh filename="package://spot_micro_description/meshes/mainbody.stl" scale="0.001 0.001 0.001"/></geometry>
+      <material name="black"/>
+      <origin rpy="0 0 0" xyz="-0.042 -0.055 -0.010"/>
+    </visual>
+    <collision>
+      <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+    </collision>
+    <inertial>
+      <mass value="2.80"/>
+      <inertia ixx="0.010" ixy="0" ixz="0" iyy="0.015" iyz="0" izz="0.015"/>
+    </inertial>
+  </link>
+
+  <link name="rear_link">
+    <visual>
+      <geometry><mesh filename="package://spot_micro_description/meshes/backpart.stl" scale="0.001 0.001 0.001"/></geometry>
+      <origin rpy="0 0 3.14159" xyz="0.04 0.055 -0.010"/>
+      <material name="yellow"/>
+    </visual>
+  </link>
+  <joint name="base_rear" type="fixed">
+    <parent link="base_link"/><child link="rear_link"/><origin xyz="0 0 0"/>
+  </joint>
+
+  <link name="front_link">
+    <visual>
+      <geometry><mesh filename="package://spot_micro_description/meshes/frontpart.stl" scale="0.001 0.001 0.001"/></geometry>
+      <origin rpy="0 0 3.14159" xyz="0.040 0.055 -0.010"/>
+      <material name="yellow"/>
+    </visual>
+  </link>
+  <joint name="base_front" type="fixed">
+    <parent link="base_link"/><child link="front_link"/><origin xyz="0 0 0"/>
+  </joint>
+
+  <!-- ── Legs ───────────────────────────────────────────────────────────────── -->
+  <!--
+    Joint names match spot_micro_config.yaml  joint_names  exactly.
+    The IK output order is: rear_right, front_right, front_left, rear_left.
+    shoulder / leg / foot suffix — no "_joint" suffix (matches URDF convention).
+  -->
+
+  <xacro:full_leg prefix="rear_right"
+    sx="-${mount_x}" sy="-${mount_y}" hip_sign="-1" left="false"
+    arm_mesh="rarm"  shoulder_mesh="rshoulder.stl" foot_mesh="rfoot.stl"
+    arm_ox="0.130" arm_oy="0.15" sh_ox="0.135" sh_oy="0.095"/>
+
+  <xacro:full_leg prefix="front_right"
+    sx="${mount_x}"  sy="-${mount_y}" hip_sign="-1" left="false"
+    arm_mesh="rarm"  shoulder_mesh="rshoulder.stl" foot_mesh="rfoot.stl"
+    arm_ox="0.130" arm_oy="0.15" sh_ox="0.135" sh_oy="0.095"/>
+
+  <xacro:full_leg prefix="front_left"
+    sx="${mount_x}"  sy="${mount_y}"  hip_sign="1"  left="true"
+    arm_mesh="larm"  shoulder_mesh="lshoulder.stl" foot_mesh="lfoot.stl"
+    arm_ox="0.130" arm_oy="-0.040" sh_ox="0.135" sh_oy="0.015"/>
+
+  <xacro:full_leg prefix="rear_left"
+    sx="-${mount_x}" sy="${mount_y}"  hip_sign="1"  left="true"
+    arm_mesh="larm"  shoulder_mesh="lshoulder.stl" foot_mesh="lfoot.stl"
+    arm_ox="0.130" arm_oy="-0.040" sh_ox="0.135" sh_oy="0.015"/>
+
+</robot>

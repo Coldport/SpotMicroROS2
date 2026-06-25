@@ -1,0 +1,66 @@
+# SpotMicro robot configuration
+# Source geometry: mike4192/spotMicro (MIT License)
+# All distances in metres.  All angles in radians.
+#
+# Edit this file to tune the geometry to your physical build.
+# The IK solver and URDF generator both read from here.
+
+spot_micro:
+
+  # ── Kinematic parameters (IK solver) ────────────────────────────────────────
+  # These define the leg chain lengths used for inverse kinematics.
+  # Measure joint-to-joint along each link on your physical robot.
+  kinematics:
+    body_length:          0.186    # front-to-rear leg mount spacing
+    body_width:           0.078    # left-to-right leg mount spacing
+    hip_length:           0.055    # abduction link  (shoulder joint → leg joint)
+    upper_leg_length:     0.1075   # thigh           (leg joint → knee joint)
+    lower_leg_length:     0.130    # shin            (knee joint → toe)
+    default_body_height:  0.18     # body centre height above ground (neutral stance)
+
+  # ── Visual / collision body box (URDF rendering) ────────────────────────────
+  visual:
+    body_length:  0.140
+    body_width:   0.110
+    body_height:  0.070
+    front_length: 0.058   # front nose piece
+    rear_length:  0.040   # rear tail piece
+    toe_radius:   0.020   # spherical toe collision
+
+  # ── Joint limits ─────────────────────────────────────────────────────────────
+  # Copied from mike4192 URDF — adjust to match your servo range.
+  joint_limits:
+    shoulder:                # abduction/adduction (x-axis rotation)
+      min: -0.548            # ≈ -31.4°
+      max:  0.548            # ≈ +31.4°
+    leg:                     # hip flexion/extension (y-axis rotation)
+      min: -2.666            # ≈ -152.7°
+      max:  1.548            # ≈ +88.7°
+    foot:                    # knee flexion (y-axis rotation)
+      min: -2.600            # ≈ -149.0°
+      max:  0.100            # ≈ +5.7°
+
+  # ── ROS2 joint names ─────────────────────────────────────────────────────────
+  # Must match the joint names in spot_micro.urdf.xacro exactly.
+  # Order matches IK output: rear_right → front_right → front_left → rear_left
+  joint_names:
+    - rear_right_shoulder
+    - rear_right_leg
+    - rear_right_foot
+    - front_right_shoulder
+    - front_right_leg
+    - front_right_foot
+    - front_left_shoulder
+    - front_left_leg
+    - front_left_foot
+    - rear_left_shoulder
+    - rear_left_leg
+    - rear_left_foot
+
+  # ── Inertia / mass (for gazebo / physics sim) ────────────────────────────────
+  mass:
+    body:     2.80
+    shoulder: 0.10
+    leg:      0.15
+    foot:     0.10
+    toe:      0.05
