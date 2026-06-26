@@ -1,3 +1,0 @@
-[console_scripts]
-minimal_python_node = my_robot_tutorials.minimal_python_node:main
-
