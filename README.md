@@ -69,6 +69,18 @@ ls -l /dev/rplidar          # confirm the udev rule matched the device
 ros2 topic echo /scan       # confirm scan data is publishing (in another terminal)
 ```
 
+### Motor spins then stops / `Can not start scan: 80008002!`
+
+`80008002` is the SDK's `SL_RESULT_OPERATION_TIMEOUT` code. If it shows up right after the motor starts spinning (and the motor then stalls), the Pi's USB ports aren't supplying enough current to the lidar. A Raspberry Pi 5 limits total USB current to **600mA by default** unless it detects a genuine 5V/5A USB-PD supply at boot — which the RPLIDAR A2M12's motor can exceed on its own.
+
+If you're using the official 27W (5V/5A) Pi 5 power supply, force the higher 1.6A limit in `/boot/firmware/config.txt`:
+
+```
+usb_max_current_enable=1
+```
+
+then reboot. **Only do this with a supply actually rated for 5V/5A** — forcing the limit with a weaker supply can brown out the Pi itself instead of just the lidar. If you're not sure of your supply's rating, use a powered USB hub for the lidar instead.
+
 `sllidar_ros2` also ships an RViz-enabled launch file for visual debugging:
 
 ```
