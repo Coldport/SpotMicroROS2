@@ -12,6 +12,8 @@
 #   4. Adds your user to the "dialout" and "i2c" groups so PCA9685/servo
 #      scripts (Servo_calib.py, test_IK.py) can open /dev/gpiochip4 and
 #      /dev/i2c-1 without sudo.
+#   5. Installs the sllidar_ros2 udev rule so the RPLIDAR A2M12 always shows
+#      up at the stable path /dev/rplidar instead of a shifting /dev/ttyUSBx.
 #
 # Safe to re-run any time.
 #
@@ -87,6 +89,25 @@ add_group_if_missing dialout
 add_group_if_missing i2c
 
 # ---------------------------------------------------------------------------
+# 5. RPLIDAR A2M12 udev rule (stable /dev/rplidar symlink)
+# ---------------------------------------------------------------------------
+LIDAR_RULE_SRC="$REPO_DIR/src/sllidar_ros2/scripts/rplidar.rules"
+LIDAR_RULE_DST="/etc/udev/rules.d/rplidar.rules"
+if [ -f "$LIDAR_RULE_SRC" ]; then
+    log "Installing RPLIDAR udev rule ($LIDAR_RULE_DST)"
+    if sudo cmp -s "$LIDAR_RULE_SRC" "$LIDAR_RULE_DST" 2>/dev/null; then
+        echo "  already installed"
+    else
+        sudo cp "$LIDAR_RULE_SRC" "$LIDAR_RULE_DST"
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger
+        echo "  installed and reloaded udev"
+    fi
+else
+    warn "src/sllidar_ros2 not found — skipping RPLIDAR udev rule"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 log "Done."
@@ -105,8 +126,15 @@ fi
 
 cat <<'EOF'
 
-Quick hardware check once your session is refreshed:
+Quick hardware checks once your session is refreshed:
     i2cdetect -y 1        # should show your PCA9685 (default 0x40, plus 0x70 all-call)
+    ls -l /dev/rplidar    # should exist once the RPLIDAR A2M12 is plugged in
+
+Build and launch the RPLIDAR driver:
+    source /opt/ros/jazzy/setup.bash
+    colcon build --packages-select sllidar_ros2
+    source install/setup.bash
+    ros2 launch sllidar_ros2 sllidar_a2m12_launch.py serial_port:=/dev/rplidar
 
 Running GUI scripts (e.g. Servo_calib.py's Tkinter window) over SSH/VSCode
 Remote-SSH also needs X11 forwarding set up on your LOCAL machine (this

@@ -46,3 +46,33 @@ _tkinter.TclError: no display name and no $DISPLAY environment variable
    It should print something like `localhost:10.0`. If it's empty, X11 forwarding isn't active yet — double check steps 1–3.
 
 Once `$DISPLAY` is set, GUI scripts will render normally.
+
+## LIDAR (RPLIDAR A2M12)
+
+`src/sllidar_ros2` is Slamtec's official ROS2 driver, vendored into this workspace as source (it isn't shipped as a prebuilt apt package). It supports RPLIDAR A1/A2/A3/S1/S2/S3/C1/T1; the A2M12 is the one wired up here, at its default baud rate of **256000**.
+
+`./setup.sh` installs the driver's udev rule so the lidar always appears at the stable path `/dev/rplidar`, regardless of which `/dev/ttyUSBx` it happens to enumerate as.
+
+Build and launch:
+
+```
+source /opt/ros/jazzy/setup.bash
+colcon build --packages-select sllidar_ros2
+source install/setup.bash
+ros2 launch sllidar_ros2 sllidar_a2m12_launch.py serial_port:=/dev/rplidar
+```
+
+Sanity checks:
+
+```
+ls -l /dev/rplidar          # confirm the udev rule matched the device
+ros2 topic echo /scan       # confirm scan data is publishing (in another terminal)
+```
+
+`sllidar_ros2` also ships an RViz-enabled launch file for visual debugging:
+
+```
+ros2 launch sllidar_ros2 view_sllidar_a2m12_launch.py serial_port:=/dev/rplidar
+```
+
+(RViz needs a display — see the X11 forwarding section above if you're running it over SSH.)
