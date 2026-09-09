@@ -9,13 +9,16 @@
 #   2. Recreates .venv from scratch with --system-site-packages (so ROS2's
 #      rclpy/launch_ros/ament_* are importable once you source a ROS2 setup.bash).
 #   3. Installs the project's Python dependencies into .venv.
-#   4. Adds your user to the "dialout" and "i2c" groups so PCA9685/servo
-#      scripts (Servo_calib.py, test_IK.py) can open /dev/gpiochip4 and
-#      /dev/i2c-1 without sudo.
+#   4. Adds your user to the "dialout", "i2c", and "video" groups so
+#      PCA9685/servo scripts (Servo_calib.py, test_IK.py) can open
+#      /dev/gpiochip4 and /dev/i2c-1, and the usb_cam driver can open the
+#      camera's /dev/videoN, all without sudo.
 #   5. Installs the sllidar_ros2 udev rule so the RPLIDAR A2M12 always shows
 #      up at the stable path /dev/rplidar instead of a shifting /dev/ttyUSBx.
 #   6. Installs and enables a systemd service that runs foxglove_bridge
 #      (ROS2 WebSocket server for viewing /scan etc. from a browser) on boot.
+#   7. Installs ros-jazzy-usb-cam and the spot_micro_camera udev rule so the
+#      robot's USB webcam always shows up at the stable path /dev/spotmicro_cam.
 #
 # Safe to re-run any time.
 #
@@ -89,6 +92,7 @@ add_group_if_missing() {
 
 add_group_if_missing dialout
 add_group_if_missing i2c
+add_group_if_missing video
 
 # ---------------------------------------------------------------------------
 # 5. RPLIDAR A2M12 udev rule (stable /dev/rplidar symlink)
@@ -140,6 +144,32 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 7. USB webcam (Anker PowerConf C200) — usb_cam driver + udev rule
+# ---------------------------------------------------------------------------
+CAMERA_RULE_SRC="$REPO_DIR/src/spot_micro_camera/udev/spotmicro_cam.rules"
+CAMERA_RULE_DST="/etc/udev/rules.d/spotmicro_cam.rules"
+if command -v ros2 >/dev/null 2>&1 || [ -d /opt/ros ]; then
+    log "Installing usb_cam driver"
+    sudo apt-get install -y ros-jazzy-usb-cam
+else
+    warn "ROS2 not found at /opt/ros — skipping usb_cam driver install"
+fi
+
+if [ -f "$CAMERA_RULE_SRC" ]; then
+    log "Installing camera udev rule ($CAMERA_RULE_DST)"
+    if sudo cmp -s "$CAMERA_RULE_SRC" "$CAMERA_RULE_DST" 2>/dev/null; then
+        echo "  already installed"
+    else
+        sudo cp "$CAMERA_RULE_SRC" "$CAMERA_RULE_DST"
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger
+        echo "  installed and reloaded udev"
+    fi
+else
+    warn "src/spot_micro_camera not found — skipping camera udev rule"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 log "Done."
@@ -159,8 +189,9 @@ fi
 cat <<'EOF'
 
 Quick hardware checks once your session is refreshed:
-    i2cdetect -y 1        # should show your PCA9685 (default 0x40, plus 0x70 all-call)
-    ls -l /dev/rplidar    # should exist once the RPLIDAR A2M12 is plugged in
+    i2cdetect -y 1          # should show your PCA9685 (default 0x40, plus 0x70 all-call)
+    ls -l /dev/rplidar      # should exist once the RPLIDAR A2M12 is plugged in
+    ls -l /dev/spotmicro_cam  # should exist once the USB camera is plugged in
 
 Build and launch the RPLIDAR driver:
     source /opt/ros/jazzy/setup.bash
@@ -168,10 +199,16 @@ Build and launch the RPLIDAR driver:
     source install/setup.bash
     ros2 launch sllidar_ros2 sllidar_a2m12_launch.py serial_port:=/dev/rplidar
 
+Build and launch the camera driver:
+    source /opt/ros/jazzy/setup.bash
+    colcon build --packages-select spot_micro_camera
+    source install/setup.bash
+    ros2 launch spot_micro_camera camera.launch.py
+
 foxglove_bridge runs as a systemd service (autostarts on boot) and serves a
-WebSocket at ws://<pi-ip>:8765 — view /scan etc. by connecting to it from
-https://app.foxglove.dev. Restart the service after any colcon build so it
-picks up the freshly-built workspace overlay:
+WebSocket at ws://<pi-ip>:8765 — view /scan, the camera feed, etc. by
+connecting to it from https://app.foxglove.dev. Restart the service after any
+colcon build so it picks up the freshly-built workspace overlay:
     sudo systemctl restart foxglove-bridge
 
 Running GUI scripts (e.g. Servo_calib.py's Tkinter window) over SSH/VSCode

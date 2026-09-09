@@ -1,0 +1,5 @@
+# Stable /dev/spotmicro_cam symlink for the robot's USB webcam, regardless of
+# which /dev/videoN it enumerates as (or which order it's detected relative to
+# other video devices). ATTR{index}=="0" picks out the actual capture
+# sub-device of the (composite) UVC camera, not its metadata-only interface.
+KERNEL=="video[0-9]*", ATTRS{idVendor}=="291a", ATTRS{idProduct}=="3369", ATTR{index}=="0", MODE:="0666", SYMLINK+="spotmicro_cam"

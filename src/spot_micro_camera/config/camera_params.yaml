@@ -1,0 +1,16 @@
+/**:
+    ros__parameters:
+      video_device: "/dev/spotmicro_cam"
+      framerate: 30.0
+      io_method: "mmap"
+      frame_id: "camera"
+      # yuyv2rgb reads the camera's native YUYV stream and does a plain
+      # colorspace conversion to RGB. The MJPEG pixel formats (mjpeg2rgb,
+      # raw_mjpeg) look more bandwidth-friendly on paper, but both reliably
+      # segfault usb_cam_node_exe's libav MJPEG decode path on this camera/OS
+      # combo — see README. YUYV only goes up to 640x480 on this camera,
+      # which is plenty for a live monitoring feed.
+      pixel_format: "yuyv2rgb"
+      image_width: 640
+      image_height: 480
+      camera_name: "spotmicro_cam"
