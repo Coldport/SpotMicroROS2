@@ -118,3 +118,55 @@ then point any VNC viewer at `localhost:5901`. Once connected, on the Pi:
 DISPLAY=:1 ros2 launch sllidar_ros2 view_sllidar_a2m12_launch.py serial_port:=/dev/rplidar
 ```
 RViz should appear inside the VNC session.
+
+## Camera (Anker PowerConf C200 USB webcam)
+
+`src/spot_micro_camera` wraps the apt-installed `ros-jazzy-usb-cam` driver with a launch file and
+params tuned for the robot's webcam, publishing a live feed as standard ROS2 image topics.
+
+`./setup.sh` installs `ros-jazzy-usb-cam`, adds you to the `video` group (needed to open
+`/dev/videoN` without sudo — like the `dialout`/`i2c` groups for the servo board, this only takes
+effect in a new login session), and installs a udev rule so the camera always appears at the
+stable path `/dev/spotmicro_cam` regardless of which `/dev/videoN` it enumerates as.
+
+Build and launch:
+
+```
+source /opt/ros/jazzy/setup.bash
+colcon build --packages-select spot_micro_camera
+source install/setup.bash
+ros2 launch spot_micro_camera camera.launch.py
+```
+
+This publishes to `/spotmicro_cam/image_raw` (raw `sensor_msgs/Image`) and, more usefully for
+viewing remotely, `/spotmicro_cam/image_raw/compressed` (JPEG `sensor_msgs/CompressedImage`,
+produced automatically by `image_transport`'s compressed plugin).
+
+Sanity checks:
+
+```
+ls -l /dev/spotmicro_cam                          # confirm the udev rule matched the device
+ros2 topic hz /spotmicro_cam/image_raw/compressed # confirm frames are publishing (in another terminal)
+```
+
+### Why `pixel_format: yuyv2rgb` instead of an MJPEG format
+
+`config/camera_params.yaml` decodes the camera's native YUYV stream (`yuyv2rgb`) at 640x480
+rather than using one of the MJPEG pixel formats (`mjpeg2rgb`, `raw_mjpeg`) the camera also
+supports at higher resolutions. Both MJPEG formats reliably segfault `usb_cam_node_exe` on this
+camera/OS combo — the process dies (`exit code -11`) on the very first frame, in the libav MJPEG
+decode path, regardless of resolution. YUYV sidesteps that decoder entirely and has run stable in
+testing. If you want to revisit higher resolutions, that libav crash is where to start.
+
+### Viewing the feed
+
+Same [Foxglove](https://foxglove.dev) setup used for the lidar — `foxglove-bridge` bridges
+whatever ROS2 topics already exist, so just launch `spot_micro_camera` (see above) with the
+bridge running:
+
+1. On your local machine, open [https://app.foxglove.dev](https://app.foxglove.dev), click **Open
+   connection**, choose **Foxglove WebSocket**, and enter `ws://<pi-ip>:8765`.
+2. Add an **Image** panel and set its topic to `/spotmicro_cam/image_raw/compressed`.
+
+Note: like the lidar, the foxglove-bridge service only bridges nodes/topics that already exist —
+it doesn't launch the camera driver itself.

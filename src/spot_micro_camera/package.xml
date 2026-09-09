@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>spot_micro_camera</name>
+  <version>0.1.0</version>
+  <description>USB webcam driver launch/config for SpotMicro, publishing a live camera feed over ROS2</description>
+  <maintainer email="layillatoo@gmail.com">SpotMicro</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>usb_cam</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
