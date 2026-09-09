@@ -87,7 +87,7 @@ RViz2 needs real OpenGL/GLX, which plain SSH X11 forwarding generally can't prov
 
 **Option A — Foxglove in a browser (recommended, no display/VNC setup needed).** [Foxglove](https://foxglove.dev) is a web app that renders scans, TF, etc. entirely client-side over a WebSocket — nothing X11/GLX-related involved.
 
-The bridge (`ros-jazzy-foxglove-bridge`) runs as a systemd service, [`foxglove-bridge.service`](/etc/systemd/system/foxglove-bridge.service), so it's always up — it starts on boot and restarts itself if it crashes. It sources both `/opt/ros/jazzy/setup.bash` and this workspace's `install/setup.bash`, and listens on port `8765`.
+`./setup.sh` installs `ros-jazzy-foxglove-bridge` and sets it up as a systemd service from the template at [`systemd/foxglove-bridge.service`](systemd/foxglove-bridge.service), so it's always up — it starts on boot and restarts itself if it crashes. It sources both `/opt/ros/jazzy/setup.bash` and this workspace's `install/setup.bash` (if already built), and listens on port `8765`.
 
 ```
 sudo systemctl status foxglove-bridge     # check it's running
