@@ -1,0 +1,5 @@
+/**:
+    ros__parameters:
+      frame_id: "imu_link"
+      i2c_address: 40      # 0x28 — BNO055 default; use 41 (0x29) if the ADR pin is pulled high
+      update_rate_hz: 20.0

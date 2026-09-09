@@ -149,6 +149,78 @@ ls -l /dev/spotmicro_cam                          # confirm the udev rule matche
 ros2 topic hz /spotmicro_cam/image_raw/compressed # confirm frames are publishing (in another terminal)
 ```
 
+## IMU (Adafruit BNO055, 9-DOF absolute orientation)
+
+`src/spot_micro_imu` is a custom driver node for the
+[Adafruit BNO055 breakout](https://www.adafruit.com/product/2472), wired over I2C. The BNO055
+has an onboard Cortex-M0 that fuses its accelerometer, gyroscope, and magnetometer itself, so the
+node just polls the chip's already-fused output over I2C and republishes it as standard ROS2
+messages. `spot_micro_imu/bno055.py` talks to the chip directly at the register level via
+`smbus2` (`python3-smbus2`, installed as a system package by `setup.sh`) rather than through
+Adafruit's CircuitPython/Blinka stack — that stack normally lives in this repo's `.venv`, but
+`ros2 run`/`ros2 launch` always execute the node under the system python3 (see the note in
+`setup.sh`), so a venv-only dependency wouldn't be importable by the node at runtime.
+
+Wiring (I2C, shared with the PCA9685 servo board on the same bus):
+
+| BNO055 pin | Pi pin              |
+|------------|----------------------|
+| Vin        | 3V3                  |
+| GND        | GND                  |
+| SDA        | SDA (GPIO2)          |
+| SCL        | SCL (GPIO3)          |
+
+Default I2C address is `0x28`; if that conflicts with another device on the bus, pull the
+breakout's `ADR` pin high to switch it to `0x29` and set `i2c_address: 41` in
+`src/spot_micro_imu/config/imu_params.yaml`.
+
+Build and launch:
+
+```
+source /opt/ros/jazzy/setup.bash
+colcon build --packages-select spot_micro_imu
+source install/setup.bash
+ros2 launch spot_micro_imu imu.launch.py
+```
+
+This publishes:
+
+- `/spotmicro_imu/imu/data` — `sensor_msgs/Imu`: fused orientation (quaternion), angular
+  velocity, and gravity-compensated linear acceleration
+- `/spotmicro_imu/imu/mag` — `sensor_msgs/MagneticField`: magnetometer, in tesla
+- `/spotmicro_imu/imu/temperature` — `sensor_msgs/Temperature`: onboard die temperature
+
+Sanity checks:
+
+```
+i2cdetect -y 1                        # confirm the BNO055 shows up at 0x28
+ros2 topic hz /spotmicro_imu/imu/data # confirm it's publishing (in another terminal)
+ros2 topic echo /spotmicro_imu/imu/data
+```
+
+### Calibration
+
+The BNO055 needs a brief calibration pass after power-up before its orientation output is fully
+accurate — the node logs the calibration status (`sys`/`gyro`/`accel`/`mag`, each 0-3) every 5
+seconds until all four reach 3. Gyro and accel calibrate quickly by sitting still and then moving
+through a few different orientations; the magnetometer calibrates by slowly moving the sensor
+through a figure-8 pattern in the air, away from large metal objects/motors.
+
+### Viewing the data
+
+Same [Foxglove](https://foxglove.dev) setup used for the lidar and camera — connect to
+`ws://<pi-ip>:8765` with `foxglove-bridge` running, then:
+
+- A **Raw Messages** panel on `/spotmicro_imu/imu/data` shows orientation/gyro/accel as they update.
+- A **Plot** panel can chart individual fields (e.g. `angular_velocity.z`) over time.
+
+### Why fixed covariance values
+
+The BNO055 doesn't report per-sample uncertainty over I2C, so `bno055_node.py` publishes fixed,
+rough placeholder covariances (order-of-magnitude from the datasheet's noise specs) rather than a
+real per-reading estimate. If you feed this into an EKF (e.g. `robot_localization`), tune those
+constants — or replace them with your own — first.
+
 ### Why `pixel_format: yuyv2rgb` instead of an MJPEG format
 
 `config/camera_params.yaml` decodes the camera's native YUYV stream (`yuyv2rgb`) at 640x480
