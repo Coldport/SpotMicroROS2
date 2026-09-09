@@ -81,10 +81,40 @@ usb_max_current_enable=1
 
 then reboot. **Only do this with a supply actually rated for 5V/5A** — forcing the limit with a weaker supply can brown out the Pi itself instead of just the lidar. If you're not sure of your supply's rating, use a powered USB hub for the lidar instead.
 
-`sllidar_ros2` also ships an RViz-enabled launch file for visual debugging:
+### Viewing the scan
+
+RViz2 needs real OpenGL/GLX, which plain SSH X11 forwarding generally can't provide (most X servers block indirect GLX) — you'll see errors like `Failed to create an OpenGL context`. Two ways around that:
+
+**Option A — Foxglove in a browser (recommended, no display/VNC setup needed).** [Foxglove](https://foxglove.dev) is a web app that renders scans, TF, etc. entirely client-side over a WebSocket — nothing X11/GLX-related involved.
+
+The bridge (`ros-jazzy-foxglove-bridge`) runs as a systemd service, [`foxglove-bridge.service`](/etc/systemd/system/foxglove-bridge.service), so it's always up — it starts on boot and restarts itself if it crashes. It sources both `/opt/ros/jazzy/setup.bash` and this workspace's `install/setup.bash`, and listens on port `8765`.
 
 ```
-ros2 launch sllidar_ros2 view_sllidar_a2m12_launch.py serial_port:=/dev/rplidar
+sudo systemctl status foxglove-bridge     # check it's running
+sudo systemctl restart foxglove-bridge    # pick up a fresh colcon build
+sudo journalctl -u foxglove-bridge -f     # tail its logs
+sudo systemctl disable --now foxglove-bridge   # stop it / stop autostart
 ```
 
-(RViz needs a display — see the X11 forwarding section above if you're running it over SSH.)
+To view the lidar:
+
+1. On your local machine, open [https://app.foxglove.dev](https://app.foxglove.dev) in Chrome, click **Open connection**, choose **Foxglove WebSocket**, and enter `ws://<pi-ip>:8765` (find the Pi's IP with `hostname -I`).
+2. Add a **3D** panel, add the `/scan` topic to it, and set its Fixed Frame to `laser`. Points should appear live as the lidar spins.
+
+Note: the service only bridges whatever ROS2 nodes/topics already exist — it doesn't start the lidar driver itself. Launch `sllidar_ros2` separately (see above) before expecting to see `/scan` in Foxglove.
+
+**Option B — RViz2 via a VNC virtual desktop on the Pi.** Slower (software-rendered) but shows the exact upstream RViz config. One-time setup:
+```
+sudo apt-get install tigervnc-standalone-server tigervnc-common openbox
+vncpasswd                                          # set a VNC password
+vncserver :1 -localhost yes -geometry 1280x800     # starts an openbox desktop on :1
+```
+From your local machine, tunnel and connect:
+```
+ssh -L 5901:localhost:5901 <user>@<pi-ip>
+```
+then point any VNC viewer at `localhost:5901`. Once connected, on the Pi:
+```
+DISPLAY=:1 ros2 launch sllidar_ros2 view_sllidar_a2m12_launch.py serial_port:=/dev/rplidar
+```
+RViz should appear inside the VNC session.

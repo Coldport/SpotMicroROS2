@@ -14,6 +14,8 @@
 #      /dev/i2c-1 without sudo.
 #   5. Installs the sllidar_ros2 udev rule so the RPLIDAR A2M12 always shows
 #      up at the stable path /dev/rplidar instead of a shifting /dev/ttyUSBx.
+#   6. Installs and enables a systemd service that runs foxglove_bridge
+#      (ROS2 WebSocket server for viewing /scan etc. from a browser) on boot.
 #
 # Safe to re-run any time.
 #
@@ -108,6 +110,36 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 6. foxglove_bridge systemd service (autostart on boot)
+# ---------------------------------------------------------------------------
+FOXGLOVE_UNIT_SRC="$REPO_DIR/systemd/foxglove-bridge.service"
+FOXGLOVE_UNIT_DST="/etc/systemd/system/foxglove-bridge.service"
+if command -v ros2 >/dev/null 2>&1 || [ -d /opt/ros ]; then
+    if [ -f "$FOXGLOVE_UNIT_SRC" ]; then
+        log "Installing foxglove_bridge systemd service"
+        sudo apt-get install -y ros-jazzy-foxglove-bridge
+
+        RENDERED_UNIT="$(mktemp)"
+        sed -e "s|__USER__|$USER|g" -e "s|__REPO_DIR__|$REPO_DIR|g" \
+            "$FOXGLOVE_UNIT_SRC" > "$RENDERED_UNIT"
+
+        if sudo cmp -s "$RENDERED_UNIT" "$FOXGLOVE_UNIT_DST" 2>/dev/null; then
+            echo "  already installed"
+        else
+            sudo cp "$RENDERED_UNIT" "$FOXGLOVE_UNIT_DST"
+            sudo systemctl daemon-reload
+            sudo systemctl enable --now foxglove-bridge.service
+            echo "  installed, enabled, and started"
+        fi
+        rm -f "$RENDERED_UNIT"
+    else
+        warn "systemd/foxglove-bridge.service not found — skipping"
+    fi
+else
+    warn "ROS2 not found at /opt/ros — skipping foxglove_bridge service"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 log "Done."
@@ -135,6 +167,12 @@ Build and launch the RPLIDAR driver:
     colcon build --packages-select sllidar_ros2
     source install/setup.bash
     ros2 launch sllidar_ros2 sllidar_a2m12_launch.py serial_port:=/dev/rplidar
+
+foxglove_bridge runs as a systemd service (autostarts on boot) and serves a
+WebSocket at ws://<pi-ip>:8765 — view /scan etc. by connecting to it from
+https://app.foxglove.dev. Restart the service after any colcon build so it
+picks up the freshly-built workspace overlay:
+    sudo systemctl restart foxglove-bridge
 
 Running GUI scripts (e.g. Servo_calib.py's Tkinter window) over SSH/VSCode
 Remote-SSH also needs X11 forwarding set up on your LOCAL machine (this

@@ -1,0 +1,14 @@
+[Unit]
+Description=Foxglove bridge for SpotMicroROS2 (ROS2 WebSocket server)
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO_DIR__
+ExecStart=/bin/bash -c 'source /opt/ros/jazzy/setup.bash; [ -f __REPO_DIR__/install/setup.bash ] && source __REPO_DIR__/install/setup.bash; exec ros2 run foxglove_bridge foxglove_bridge'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
