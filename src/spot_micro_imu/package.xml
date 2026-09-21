@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>spot_micro_imu</name>
+  <version>0.1.0</version>
+  <description>Adafruit BNO055 9-DOF IMU driver for SpotMicro, publishing fused orientation, angular velocity, linear acceleration, magnetometer, and temperature over ROS2</description>
+  <maintainer email="layillatoo@gmail.com">SpotMicro</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>python3-smbus2</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -210,6 +210,73 @@
     <parent link="base_link"/><child link="front_link"/><origin xyz="0 0 0"/>
   </joint>
 
+  <!-- ── Sensors ──────────────────────────────────────────────────────────────
+    Frame names match what the drivers stamp their messages with:
+      laser    — sllidar_node  (/scan)
+      imu_link — bno055_node   (/spotmicro_imu/imu/data)
+      d405_link — realsense2_camera; the driver publishes its own d405_link →
+                  d405_*_optical_frame TF, so only d405_link is attached here.
+
+    Everything is measured from base_link, which is the body centre: midway
+    between the front and rear shoulder axes, with z=0 at shoulder-axis height.
+    The stock URDF above is NOT stretched, so the torso stretch is only applied
+    to the sensor positions below. If the leg mount spacing also grew by that
+    amount, mount_x / body_length (config yaml) need updating separately.
+
+    Values marked MEASURE are estimates: check them against the robot, they
+    directly shift where /scan and the camera appear relative to the body.
+  -->
+  <xacro:property name="torso_stretch"      value="0.020" />  <!-- added to the stock torso length -->
+  <!-- Stock front face at x=0.121 (mainbody.stl), stretch assumed split evenly
+       front/rear about base_link.                                     MEASURE -->
+  <xacro:property name="torso_front_x"      value="${0.121 + torso_stretch/2}" />
+  <xacro:property name="torso_top_z"        value="0.035" />  <!-- top cover; = body_height/2 -->
+
+  <xacro:property name="imu_below_cover"    value="0.007" />  <!-- IMU sits 7 mm under the top cover -->
+  <xacro:property name="imu_roll"           value="0" />      <!-- IMU axes vs base_link (x fwd, y left, z up) -->
+  <xacro:property name="imu_pitch"          value="0" />      <!--                                   MEASURE -->
+  <xacro:property name="imu_yaw"            value="0" />
+
+  <xacro:property name="lidar_scan_height"  value="0.035" />  <!-- cover to scan plane (A2M12) MEASURE -->
+  <xacro:property name="lidar_yaw"          value="0" />      <!-- rotation of scan 0 deg vs +x MEASURE -->
+
+  <xacro:property name="camera_y"           value="0" />      <!-- centred                     MEASURE -->
+  <xacro:property name="camera_z"           value="0" />      <!-- height on the front face    MEASURE -->
+
+  <link name="imu_link"/>
+  <joint name="base_imu" type="fixed">
+    <parent link="base_link"/><child link="imu_link"/>
+    <origin xyz="0 0 ${torso_top_z - imu_below_cover}" rpy="${imu_roll} ${imu_pitch} ${imu_yaw}"/>
+  </joint>
+
+  <!-- RPLIDAR A2M12: 76 x 76 x 41 mm. The laser frame is the scan plane; the
+       visual is drawn below it so it sits on the top cover. -->
+  <link name="laser">
+    <visual>
+      <geometry><cylinder radius="0.038" length="0.041"/></geometry>
+      <origin xyz="0 0 ${0.041/2 - lidar_scan_height}" rpy="0 0 0"/>
+      <material name="grey"/>
+    </visual>
+  </link>
+  <joint name="base_laser" type="fixed">
+    <parent link="base_link"/><child link="laser"/>
+    <origin xyz="0 0 ${torso_top_z + lidar_scan_height}" rpy="0 0 ${lidar_yaw}"/>
+  </joint>
+
+  <!-- RealSense D405: 42 x 42 x 23 mm, front face flush with the torso front.
+       d405_link is taken as the camera's centre, on the front face plane. -->
+  <link name="d405_link">
+    <visual>
+      <geometry><box size="0.023 0.042 0.042"/></geometry>
+      <origin xyz="-0.0115 0 0" rpy="0 0 0"/>
+      <material name="black"/>
+    </visual>
+  </link>
+  <joint name="base_camera" type="fixed">
+    <parent link="base_link"/><child link="d405_link"/>
+    <origin xyz="${torso_front_x} ${camera_y} ${camera_z}" rpy="0 0 0"/>
+  </joint>
+
   <!-- ── Legs ───────────────────────────────────────────────────────────────── -->
   <!--
     Joint names match spot_micro_config.yaml  joint_names  exactly.

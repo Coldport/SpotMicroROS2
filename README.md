@@ -119,15 +119,16 @@ DISPLAY=:1 ros2 launch sllidar_ros2 view_sllidar_a2m12_launch.py serial_port:=/d
 ```
 RViz should appear inside the VNC session.
 
-## Camera (Anker PowerConf C200 USB webcam)
+## Camera (Intel RealSense D405 depth camera)
 
-`src/spot_micro_camera` wraps the apt-installed `ros-jazzy-usb-cam` driver with a launch file and
-params tuned for the robot's webcam, publishing a live feed as standard ROS2 image topics.
+`src/spot_micro_camera` launches the apt-installed `ros-jazzy-realsense2-camera` driver with params
+tuned for the robot's [RealSense D405](https://www.intelrealsense.com/depth-camera-d405/),
+publishing color and depth as standard ROS2 image topics.
 
-`./setup.sh` installs `ros-jazzy-usb-cam`, adds you to the `video` group (needed to open
-`/dev/videoN` without sudo — like the `dialout`/`i2c` groups for the servo board, this only takes
-effect in a new login session), and installs a udev rule so the camera always appears at the
-stable path `/dev/spotmicro_cam` regardless of which `/dev/videoN` it enumerates as.
+`./setup.sh` installs `ros-jazzy-realsense2-camera` (which pulls in `librealsense2` and the `rs-*`
+command-line tools) and a udev rule that makes the camera's `/dev/videoN` nodes and USB device
+readable without sudo. Plug the camera into a **USB 3** port (blue) — it's on USB 3.2 in the
+tested setup, and Intel recommends USB 3 for the full-rate streams.
 
 Build and launch:
 
@@ -138,25 +139,72 @@ source install/setup.bash
 ros2 launch spot_micro_camera camera.launch.py
 ```
 
-This publishes to `/spotmicro_cam/image_raw` (raw `sensor_msgs/Image`) and, more usefully for
-viewing remotely, `/spotmicro_cam/image_raw/compressed` (JPEG `sensor_msgs/CompressedImage`,
-produced automatically by `image_transport`'s compressed plugin).
+Launch arguments:
+
+- `serial_no:=<serial>` — open a specific camera (see `rs-enumerate-devices -s`); the default
+  picks the first RealSense found, which is fine with one camera.
+- `pointcloud:=true` — also publish a colored point cloud (about 9% CPU on the Pi 5 at 640x480).
+- `colorize_depth:=true` — for *viewing*: turns `depth/image_rect_raw` into a color-mapped `rgb8`
+  image (see [Viewing depth](#viewing-depth) below). This replaces the raw millimeter values, so
+  leave it off for anything that consumes depth.
+
+Published topics, all under `/spotmicro_cam/d405/`:
+
+| Topic | Type |
+|---|---|
+| `color/image_raw` (+ `/compressed`) | `sensor_msgs/Image` RGB8 |
+| `depth/image_rect_raw` (+ `/compressedDepth`) | `sensor_msgs/Image` 16UC1, millimeters (`rgb8` with `colorize_depth:=true`) |
+| `color/camera_info`, `depth/camera_info` | `sensor_msgs/CameraInfo` |
+| `depth/color/points` (only with `pointcloud:=true`) | `sensor_msgs/PointCloud2` |
+
+TF frames are prefixed `d405_` (`d405_link`, `d405_color_optical_frame`, ...).
 
 Sanity checks:
 
 ```
-ls -l /dev/spotmicro_cam                          # confirm the udev rule matched the device
-ros2 topic hz /spotmicro_cam/image_raw/compressed # confirm frames are publishing (in another terminal)
+rs-enumerate-devices -s                                     # should list "RealSense D405" and its serial
+ros2 topic hz /spotmicro_cam/d405/color/image_raw/compressed   # ~30 Hz (in another terminal)
 ```
 
-### Why `pixel_format: yuyv2rgb` instead of an MJPEG format
+### Notes on `config/camera_params.yaml`
 
-`config/camera_params.yaml` decodes the camera's native YUYV stream (`yuyv2rgb`) at 640x480
-rather than using one of the MJPEG pixel formats (`mjpeg2rgb`, `raw_mjpeg`) the camera also
-supports at higher resolutions. Both MJPEG formats reliably segfault `usb_cam_node_exe` on this
-camera/OS combo — the process dies (`exit code -11`) on the very first frame, in the libav MJPEG
-decode path, regardless of resolution. YUYV sidesteps that decoder entirely and has run stable in
-testing. If you want to revisit higher resolutions, that libav crash is where to start.
+- **Color comes from the same sensor as depth** on the D405 (there's no separate RGB camera), so
+  the color profile is `depth_module.color_profile`, not `rgb_camera.color_profile`. All streams
+  share one resolution at a time.
+- **Streams are 640x480 @ 30 fps.** The camera also supports 848x480 up to 90 fps and 1280x720 up
+  to 30 fps (`rs-enumerate-devices -c`); edit the two `*_profile` values to change it.
+- **Infrared streams are explicitly disabled.** Left to its defaults the driver also opens Infra 1/2
+  at 848x480, which conflicts with the 640x480 depth/color profile on the shared sensor and
+  results in *no frames at all* (`Frames didn't arrived within 5 seconds`). If you enable them, set
+  a matching `depth_module.infra_profile`.
+- **The point cloud filter is named `pointcloud__neon_` on the Pi** (ARM builds), so the
+  `pointcloud.enable` parameter in the driver's own docs/`rs_launch.py` is silently ignored here.
+  `camera.launch.py` sets both names.
+
+### Permission errors when running the `rs-*` tools
+
+`rs-enumerate-devices` and friends print a wall of `Mipi device capability could not be grabbed /
+Permission denied` errors on the Pi: librealsense probes every `/dev/video*` node, including the
+Pi's unrelated video-codec/ISP ones, which are only readable by the `video` group. The camera is
+still found and they're harmless, but joining the `video` group (`./setup.sh` does this; takes
+effect in a new login session) should silence them. Filter them out meanwhile with
+`... 2>&1 | grep -v "Mipi device\|get_dev_capabilities"`.
+
+### Viewing depth
+
+The raw depth image is 16-bit millimeters (`16UC1`). The data itself is fine — checked by reading
+a frame directly — but it is not something every viewer renders sensibly (in Foxglove it came out
+looking like noise). Two ways around that:
+
+- Launch with `colorize_depth:=true` and point an Image panel at
+  `/spotmicro_cam/d405/depth/image_rect_raw` (or its `/compressed` variant). The color range and
+  preset are the driver's `colorizer.min_distance` / `max_distance` / `color_scheme` parameters.
+- Launch with `pointcloud:=true` and add a **3D** panel on `/spotmicro_cam/d405/depth/color/points`.
+
+Don't subscribe to `depth/image_rect_raw/compressed` while `colorize_depth` is off: that topic uses
+the JPEG plugin, which can't encode 16-bit depth, and the driver logs
+`[CompressedPublisher]: [16UC1] is not a color format` for it. Use `.../compressedDepth` (or the
+raw topic) for raw depth, and `/compressed` only for the colorized image.
 
 ### Viewing the feed
 
@@ -166,7 +214,143 @@ bridge running:
 
 1. On your local machine, open [https://app.foxglove.dev](https://app.foxglove.dev), click **Open
    connection**, choose **Foxglove WebSocket**, and enter `ws://<pi-ip>:8765`.
-2. Add an **Image** panel and set its topic to `/spotmicro_cam/image_raw/compressed`.
+2. Add an **Image** panel and set its topic to `/spotmicro_cam/d405/color/image_raw/compressed`
+   (for depth see [Viewing depth](#viewing-depth) above).
 
 Note: like the lidar, the foxglove-bridge service only bridges nodes/topics that already exist —
 it doesn't launch the camera driver itself.
+
+## Robot bringup and SLAM
+
+`src/spot_micro_bringup` starts the whole sensing stack in one command. It **does not** start the
+gait controller or move the robot.
+
+```
+source /opt/ros/jazzy/setup.bash
+colcon build
+source install/setup.bash
+ros2 launch spot_micro_bringup robot.launch.py
+```
+
+This runs `robot_state_publisher` (the URDF), the lidar, IMU, D405 camera, a static
+`odom → base_link`, and `slam_toolbox`. Each piece can be switched off:
+`lidar:=false imu:=false camera:=false slam:=false`. `serial_port:=` overrides the lidar port
+(default `/dev/rplidar`).
+
+### TF tree
+
+```
+map ─(slam_toolbox)→ odom ─(static identity)→ base_link ─┬→ laser
+                                                          ├→ imu_link
+                                                          ├→ d405_link → d405_*_optical_frame
+                                                          └→ leg links (only with joint states)
+```
+
+`base_link` is the body centre. The sensor mounting offsets live in one labelled block of
+properties near the top of the "Sensors" section of
+`spot_micro_description/urdf/spot_micro.urdf.xacro`; the ones marked `MEASURE` are estimates —
+check them against the robot, since they decide where `/scan` and the camera sit relative to the
+body. In particular, `lidar_yaw` assumes the scan's 0° points at the robot's front: put an object
+directly ahead and confirm it shows up straight ahead in Foxglove.
+
+### No odometry yet
+
+Nothing publishes real odometry until the gait controller runs, so `odom → base_link` is a static
+identity and slam_toolbox builds the map from **scan matching alone**. That works for slow, smooth
+movement (e.g. carrying the robot around) but will drift or lose track if you move quickly.
+`config/slam_toolbox.yaml` sets `minimum_travel_distance`/`minimum_travel_heading` to 0 for this —
+with a static odom slam_toolbox would otherwise never process a scan past the first. When the gait
+controller is running it publishes the real `odom → base_link`, so launch with `static_odom:=false`
+(two publishers of the same transform will fight) and restore larger travel thresholds.
+
+The IMU isn't fused into anything yet. When you want that, `imu_filter_madgwick` (orientation) and
+`robot_localization` (EKF) are the usual next steps; see the covariance note in the IMU section.
+
+### Viewing the map
+
+Foxglove: add a **3D** panel, set the display frame to `map`, and enable the `/map` and `/scan`
+topics (plus `/tf` to see the frames). Check the map from the terminal with
+`ros2 topic echo --once /map --qos-durability transient_local --field info` — `/map` is latched and
+only republishes when the map changes (every few seconds), so `ros2 topic hz /map` shows nothing.
+
+To save a map (writes `my_map.pgm` + `my_map.yaml`):
+
+```
+ros2 service call /slam_toolbox/save_map slam_toolbox/srv/SaveMap "{name: {data: '/home/r/my_map'}}"
+```
+
+`result=0` in the response means it worked. This needs `ros-jazzy-nav2-map-server` (`setup.sh`
+installs it) — slam_toolbox doesn't declare that dependency, and without it the call fails with
+`result=255`.
+
+## IMU (Adafruit BNO055, 9-DOF absolute orientation)
+
+`src/spot_micro_imu` is a custom driver node for the
+[Adafruit BNO055 breakout](https://www.adafruit.com/product/2472), wired over I2C. The BNO055
+has an onboard Cortex-M0 that fuses its accelerometer, gyroscope, and magnetometer itself, so the
+node just polls the chip's already-fused output over I2C and republishes it as standard ROS2
+messages. `spot_micro_imu/bno055.py` talks to the chip directly at the register level via
+`smbus2` (`python3-smbus2`, installed as a system package by `setup.sh`) rather than through
+Adafruit's CircuitPython/Blinka stack — that stack normally lives in this repo's `.venv`, but
+`ros2 run`/`ros2 launch` always execute the node under the system python3 (see the note in
+`setup.sh`), so a venv-only dependency wouldn't be importable by the node at runtime.
+
+Wiring (I2C, shared with the PCA9685 servo board on the same bus):
+
+| BNO055 pin | Pi pin              |
+|------------|----------------------|
+| Vin        | 3V3                  |
+| GND        | GND                  |
+| SDA        | SDA (GPIO2)          |
+| SCL        | SCL (GPIO3)          |
+
+Default I2C address is `0x28`; if that conflicts with another device on the bus, pull the
+breakout's `ADR` pin high to switch it to `0x29` and set `i2c_address: 41` in
+`src/spot_micro_imu/config/imu_params.yaml`.
+
+Build and launch:
+
+```
+source /opt/ros/jazzy/setup.bash
+colcon build --packages-select spot_micro_imu
+source install/setup.bash
+ros2 launch spot_micro_imu imu.launch.py
+```
+
+This publishes:
+
+- `/spotmicro_imu/imu/data` — `sensor_msgs/Imu`: fused orientation (quaternion), angular
+  velocity, and gravity-compensated linear acceleration
+- `/spotmicro_imu/imu/mag` — `sensor_msgs/MagneticField`: magnetometer, in tesla
+- `/spotmicro_imu/imu/temperature` — `sensor_msgs/Temperature`: onboard die temperature
+
+Sanity checks:
+
+```
+i2cdetect -y 1                        # confirm the BNO055 shows up at 0x28
+ros2 topic hz /spotmicro_imu/imu/data # confirm it's publishing (in another terminal)
+ros2 topic echo /spotmicro_imu/imu/data
+```
+
+### Calibration
+
+The BNO055 needs a brief calibration pass after power-up before its orientation output is fully
+accurate — the node logs the calibration status (`sys`/`gyro`/`accel`/`mag`, each 0-3) every 5
+seconds until all four reach 3. Gyro and accel calibrate quickly by sitting still and then moving
+through a few different orientations; the magnetometer calibrates by slowly moving the sensor
+through a figure-8 pattern in the air, away from large metal objects/motors.
+
+### Viewing the data
+
+Same [Foxglove](https://foxglove.dev) setup used for the lidar and camera — connect to
+`ws://<pi-ip>:8765` with `foxglove-bridge` running, then:
+
+- A **Raw Messages** panel on `/spotmicro_imu/imu/data` shows orientation/gyro/accel as they update.
+- A **Plot** panel can chart individual fields (e.g. `angular_velocity.z`) over time.
+
+### Why fixed covariance values
+
+The BNO055 doesn't report per-sample uncertainty over I2C, so `bno055_node.py` publishes fixed,
+rough placeholder covariances (order-of-magnitude from the datasheet's noise specs) rather than a
+real per-reading estimate. If you feed this into an EKF (e.g. `robot_localization`), tune those
+constants — or replace them with your own — first.

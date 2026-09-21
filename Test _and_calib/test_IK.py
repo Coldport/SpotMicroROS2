@@ -145,27 +145,29 @@ class Leg:
         Y_adjusted = Y + 40
         
         # Calculate intermediate distances
-        D = np.sqrt(Y_adjusted**2 + Z**2 - 1600)  # 40^2 = 1600
+        # Clamp to 0 instead of going negative: a target inside the 40mm
+        # dead-zone around the hip axis would otherwise produce NaN (sqrt of
+        # a negative number) instead of just being slightly unreachable.
+        D_sq = np.maximum(Y_adjusted**2 + Z**2 - 1600, 0.0)  # 40^2 = 1600
+        D = np.sqrt(D_sq)
         G = np.sqrt(D**2 + X**2)
         #print(self.leg_name)
 
         # Calculate joint angles
-        if self.leg_name in ["RL"]:
+        # The link geometry is identical for all four legs; left/right
+        # differences are handled in Move_To_L via the servo mapping.
+        if self.leg_name in self.VALID_LEG_NAMES:
 
             hip_angle = np.arctan2(Z, Y_adjusted) + np.arctan2(40, D)
-            lower_angle = np.arccos((G**2 - 28800) / (-28800))  # 2 * 120^2 = 28800
+            lower_angle = np.arccos(np.clip((G**2 - 28800) / (-28800), -1.0, 1.0))  # 2 * 120^2 = 28800
             upper_angle = np.arctan2(D, X) - np.arcsin((120 * np.sin(lower_angle)) / G)
             upper_angle = np.pi/2 - upper_angle
 
-        elif self.leg_name in ["FL"]:
+        else:
+            raise NotImplementedError(
+                f"IK / servo mapping not implemented for leg '{self.leg_name}'"
+            )
 
-            hip_angle = np.arctan2(Z, Y_adjusted) + np.arctan2(40, D) #+ np.pi/4
-            lower_angle = np.arccos((G**2 - 28800) / (-28800))  # 2 * 120^2 = 28800
-            upper_angle = np.arctan2(D, X) - np.arcsin((120 * np.sin(lower_angle)) / G)
-            upper_angle = np.pi/2  - upper_angle 
-            lower_angle = lower_angle  
-
-        
 
         # Apply angle conversion for right legs
         #if self.from_180:
@@ -257,19 +259,42 @@ class Leg:
             points.append([x, y, z, r, p, ya])
         return points
     
+    def _set_servo_angle(self, index, angle_deg):
+        """
+        Safely write an angle (degrees) to a servo channel.
+
+        Skips NaN/inf (an unreachable IK target) and clamps to the servo's
+        actuation range instead of letting adafruit_motor raise ValueError
+        and kill the control loop.
+        """
+        if not np.isfinite(angle_deg):
+            print(f"[{self.leg_name}] servo {index}: skipping non-finite angle ({angle_deg})")
+            return
+        servo_obj = self.servos[index]
+        clamped = float(np.clip(angle_deg, 0.0, servo_obj.actuation_range))
+        if clamped != angle_deg:
+            print(f"[{self.leg_name}] servo {index}: clamped angle {angle_deg:.1f} -> {clamped:.1f}")
+        servo_obj.angle = clamped
+
     def Move_To_L(self,point):
         #filler
         x, y, z, roll, pitch, yaw = point
         Xh,Yh,Zh =self.rotational_preprocess_xyz(x, y, z, roll, pitch, yaw)
         H_ang, Th_ang , An_ang =self.inverse_kinematics(Xh,Yh,Zh)
         if self.leg_name in ["RL"]:
-            self.servos[0].angle = np.rad2deg(H_ang)
-            self.servos[2].angle = np.rad2deg(Th_ang)
-            self.servos[1].angle = np.rad2deg(An_ang)
+            self._set_servo_angle(0, np.rad2deg(H_ang))
+            self._set_servo_angle(2, np.rad2deg(Th_ang))
+            self._set_servo_angle(1, np.rad2deg(An_ang))
+        elif self.leg_name in ["RR"]:
+            # Right side is a mirror of the left: same IK, servo angle = 180 - angle
+            # (servo_calibration.txt: neutral 90/120/120 vs. left 90/60/60)
+            self._set_servo_angle(3, 180.0 - np.rad2deg(H_ang))
+            self._set_servo_angle(5, 180.0 - np.rad2deg(Th_ang))
+            self._set_servo_angle(4, 180.0 - np.rad2deg(An_ang))
         elif self.leg_name in ["FL"]:
-            self.servos[15].angle = np.rad2deg(H_ang)
-            self.servos[13].angle = np.rad2deg(Th_ang)
-            self.servos[14].angle = np.rad2deg(An_ang)
+            self._set_servo_angle(15, np.rad2deg(H_ang))
+            self._set_servo_angle(13, np.rad2deg(Th_ang))
+            self._set_servo_angle(14, np.rad2deg(An_ang))
 
     def Create_servo_driver(self):
         i2c = board.I2C()  # uses board.SCL and board.SDA
@@ -389,36 +414,48 @@ class Leg:
     def __repr__(self):
         """Detailed string representation of the leg."""
         return self.__str__()
-    
-    
+
+    def release_servos(self):
+        """
+        Disable all of this leg's servo channels (stop sending a PWM pulse)
+        so they go limp instead of holding their last commanded position.
+        """
+        for servo_obj in self.servos:
+            servo_obj.angle = None
+        print(f"[{self.leg_name}] servos released")
+
 
 def main():
 
 
 
     print("-" * 40)
-    leg1 = Leg("FL")
-    leg2 = Leg("RL")
-    leg3 = Leg("RL")
-    leg4 = Leg("RR")
+    leg1 = Leg("RL")
+    leg2 = Leg("RR")
+    leg3 = Leg("FL")
+    leg4 = Leg("FR")
 
     print("Test Trajectory interpolation")
     
-    start_pose = [0, 0, 200, 20, 0, 0]    # Start: foot below, no rotation
-    end_pose = [0, 0, 200, -20, 0, 0]   # End: foot forward/right, slight yaw
-    steps = 10
-    
+    start_pose = [-50, 10, 200, 0, 0, 0]    # Start: foot below, no rotation
+    end_pose = [-50, -10, 150, 0, 0, 0]   # End: foot forward/right, slight yaw
+    steps = 11
     print(f"Interpolating from {start_pose} to {end_pose} in {steps} steps:")
 
     try:
         while True:
-            
+            '''leg1.release_servos()
+            leg2.release_servos()
+            leg3.release_servos()
+            leg4.release_servos()'''
 
             # 1. start_pose → end_pose
             trajectory = leg1.create_points(start_pose, end_pose, steps)
             for point in trajectory:
                 leg1.Move_To_L(point)
                 leg2.Move_To_L(point)
+                leg3.Move_To_L(point)
+                leg4.Move_To_L(point)
                 time.sleep(0.051)
 
             # 2. end_pose → start_pose
@@ -426,35 +463,24 @@ def main():
             for point in trajectory:
                 leg1.Move_To_L(point)
                 leg2.Move_To_L(point)
+                leg3.Move_To_L(point)
+                leg4.Move_To_L(point)
                 time.sleep(0.051)
 
-            # 3. start_pose → [50, 0, 100, 0, 0, 0]
-            trajectory = leg1.create_points(start_pose, [50, 0, 100, 0, 0, 0], steps)
-            for point in trajectory:
-                leg1.Move_To_L(point)
-                leg2.Move_To_L(point)
-                time.sleep(0.051)
+            '''leg1.release_servos()
+            leg2.release_servos()
+            leg3.release_servos()
+            leg4.release_servos()'''
 
-            # 4. [50, 0, 100, 0, 0, 0] → [-50, 0, 100, 0, 0, 0]
-            trajectory = leg1.create_points([50, 0, 100, 0, 0, 0], [-50, 0, 100, 0, 0, 0], steps)
-            for point in trajectory:
-                leg1.Move_To_L(point)
-                leg2.Move_To_L(point)
-                time.sleep(0.051)
-
-            # 5. [-50, 0, 100, 0, 0, 0] → start_pose
-            trajectory = leg1.create_points([-50, 0, 100, 0, 0, 0], start_pose, steps)
-            for point in trajectory:
-                leg1.Move_To_L(point)
-                leg2.Move_To_L(point)
-                time.sleep(0.051)
-
-            print("\n" + "-" * 40)
 
     except KeyboardInterrupt:
         print("\nLoop interrupted by Ctrl+C")
 
-    
+    finally:
+        for leg in (leg1, leg2, leg3, leg4):
+            leg.release_servos()
+
+
 
 
 if __name__ == "__main__":

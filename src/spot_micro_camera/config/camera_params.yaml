@@ -1,16 +1,41 @@
 /**:
     ros__parameters:
-      video_device: "/dev/spotmicro_cam"
-      framerate: 30.0
-      io_method: "mmap"
-      frame_id: "camera"
-      # yuyv2rgb reads the camera's native YUYV stream and does a plain
-      # colorspace conversion to RGB. The MJPEG pixel formats (mjpeg2rgb,
-      # raw_mjpeg) look more bandwidth-friendly on paper, but both reliably
-      # segfault usb_cam_node_exe's libav MJPEG decode path on this camera/OS
-      # combo — see README. YUYV only goes up to 640x480 on this camera,
-      # which is plenty for a live monitoring feed.
-      pixel_format: "yuyv2rgb"
-      image_width: 640
-      image_height: 480
-      camera_name: "spotmicro_cam"
+      # The D405 has no separate RGB sensor: its color stream comes from the
+      # same stereo module as depth, which is why the color profile lives under
+      # depth_module.* here rather than rgb_camera.* like on other RealSense
+      # models. Profiles are "<width>x<height>x<fps>".
+      #
+      # 640x480@30 for both streams matches the old webcam feed and keeps CPU
+      # load reasonable on the Pi; the camera also supports 848x480 up to 90 fps
+      # and 1280x720 up to 30 fps if you want more resolution (see
+      # `rs-enumerate-devices -c`).
+      enable_color: true
+      enable_depth: true
+      depth_module.color_profile: "640x480x30"
+      depth_module.depth_profile: "640x480x30"
+      # Color and depth (and infrared) all share one sensor, so they must run at
+      # the same resolution. The driver otherwise opens the infrared streams at
+      # their own default (848x480), which conflicts with the profiles above and
+      # leaves the camera streaming no frames at all ("Frames didn't arrived
+      # within 5 seconds"), so keep them off unless you set a matching
+      # depth_module.infra_profile.
+      enable_infra: false
+      enable_infra1: false
+      enable_infra2: false
+
+      # Heavier outputs, off by default so the Pi isn't burning CPU on data
+      # nothing is consuming yet. `pointcloud` can be turned on from the launch
+      # file (`pointcloud:=true`); align_depth publishes depth registered to the
+      # color frame at /spotmicro_cam/d405/aligned_depth_to_color/.
+      align_depth.enable: false
+
+      # Topics come out as /spotmicro_cam/d405/... (from the node namespace/name
+      # in the launch file). camera_name is separate: it's the prefix the driver
+      # puts on TF frame ids (d405_link, d405_color_optical_frame,
+      # d405_depth_optical_frame, ...) and defaults to "camera" if not set.
+      camera_name: "d405"
+      base_frame_id: "link"
+      publish_tf: true
+      # Keep retrying if the camera is unplugged/brown-outs rather than dying.
+      reconnect_timeout: 6.0
+      wait_for_device_timeout: -1.0
