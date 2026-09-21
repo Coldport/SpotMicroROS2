@@ -220,6 +220,69 @@ bridge running:
 Note: like the lidar, the foxglove-bridge service only bridges nodes/topics that already exist —
 it doesn't launch the camera driver itself.
 
+## Robot bringup and SLAM
+
+`src/spot_micro_bringup` starts the whole sensing stack in one command. It **does not** start the
+gait controller or move the robot.
+
+```
+source /opt/ros/jazzy/setup.bash
+colcon build
+source install/setup.bash
+ros2 launch spot_micro_bringup robot.launch.py
+```
+
+This runs `robot_state_publisher` (the URDF), the lidar, IMU, D405 camera, a static
+`odom → base_link`, and `slam_toolbox`. Each piece can be switched off:
+`lidar:=false imu:=false camera:=false slam:=false`. `serial_port:=` overrides the lidar port
+(default `/dev/rplidar`).
+
+### TF tree
+
+```
+map ─(slam_toolbox)→ odom ─(static identity)→ base_link ─┬→ laser
+                                                          ├→ imu_link
+                                                          ├→ d405_link → d405_*_optical_frame
+                                                          └→ leg links (only with joint states)
+```
+
+`base_link` is the body centre. The sensor mounting offsets live in one labelled block of
+properties near the top of the "Sensors" section of
+`spot_micro_description/urdf/spot_micro.urdf.xacro`; the ones marked `MEASURE` are estimates —
+check them against the robot, since they decide where `/scan` and the camera sit relative to the
+body. In particular, `lidar_yaw` assumes the scan's 0° points at the robot's front: put an object
+directly ahead and confirm it shows up straight ahead in Foxglove.
+
+### No odometry yet
+
+Nothing publishes real odometry until the gait controller runs, so `odom → base_link` is a static
+identity and slam_toolbox builds the map from **scan matching alone**. That works for slow, smooth
+movement (e.g. carrying the robot around) but will drift or lose track if you move quickly.
+`config/slam_toolbox.yaml` sets `minimum_travel_distance`/`minimum_travel_heading` to 0 for this —
+with a static odom slam_toolbox would otherwise never process a scan past the first. When the gait
+controller is running it publishes the real `odom → base_link`, so launch with `static_odom:=false`
+(two publishers of the same transform will fight) and restore larger travel thresholds.
+
+The IMU isn't fused into anything yet. When you want that, `imu_filter_madgwick` (orientation) and
+`robot_localization` (EKF) are the usual next steps; see the covariance note in the IMU section.
+
+### Viewing the map
+
+Foxglove: add a **3D** panel, set the display frame to `map`, and enable the `/map` and `/scan`
+topics (plus `/tf` to see the frames). Check the map from the terminal with
+`ros2 topic echo --once /map --qos-durability transient_local --field info` — `/map` is latched and
+only republishes when the map changes (every few seconds), so `ros2 topic hz /map` shows nothing.
+
+To save a map (writes `my_map.pgm` + `my_map.yaml`):
+
+```
+ros2 service call /slam_toolbox/save_map slam_toolbox/srv/SaveMap "{name: {data: '/home/r/my_map'}}"
+```
+
+`result=0` in the response means it worked. This needs `ros-jazzy-nav2-map-server` (`setup.sh`
+installs it) — slam_toolbox doesn't declare that dependency, and without it the call fails with
+`result=255`.
+
 ## IMU (Adafruit BNO055, 9-DOF absolute orientation)
 
 `src/spot_micro_imu` is a custom driver node for the

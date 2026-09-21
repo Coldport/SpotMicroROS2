@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>spot_micro_bringup</name>
+  <version>0.1.0</version>
+  <description>Real-robot bringup for SpotMicro: URDF/TF, lidar, IMU, camera and slam_toolbox</description>
+  <maintainer email="layillatoo@gmail.com">SpotMicro</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>spot_micro_description</exec_depend>
+  <exec_depend>spot_micro_camera</exec_depend>
+  <exec_depend>spot_micro_imu</exec_depend>
+  <exec_depend>sllidar_ros2</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>nav2_map_server</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

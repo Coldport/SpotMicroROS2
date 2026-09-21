@@ -29,6 +29,9 @@
 #   7. Installs ros-jazzy-realsense2-camera (which pulls in librealsense2 and
 #      the rs-* tools) and the spot_micro_camera udev rule so the robot's
 #      Intel RealSense D405 can be opened without sudo.
+#   8. Installs ros-jazzy-slam-toolbox, ros-jazzy-nav2-map-server (slam_toolbox's
+#      save_map service shells out to it) and ros-jazzy-xacro, which the
+#      spot_micro_bringup launch (URDF TF + sensors + SLAM) depends on.
 #
 # Safe to re-run any time.
 #
@@ -181,6 +184,16 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 8. Robot bringup — slam_toolbox (2D lidar SLAM) + xacro (URDF processing)
+# ---------------------------------------------------------------------------
+if command -v ros2 >/dev/null 2>&1 || [ -d /opt/ros ]; then
+    log "Installing slam_toolbox, nav2_map_server and xacro"
+    sudo apt-get install -y ros-jazzy-slam-toolbox ros-jazzy-nav2-map-server ros-jazzy-xacro
+else
+    warn "ROS2 not found at /opt/ros — skipping slam_toolbox/nav2_map_server/xacro install"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 log "Done."
@@ -222,6 +235,13 @@ Build and launch the IMU driver:
     colcon build --packages-select spot_micro_imu
     source install/setup.bash
     ros2 launch spot_micro_imu imu.launch.py
+
+Build and launch everything for the real robot (URDF TF, lidar, IMU, camera,
+SLAM — does not start the gait controller or move the robot):
+    source /opt/ros/jazzy/setup.bash
+    colcon build
+    source install/setup.bash
+    ros2 launch spot_micro_bringup robot.launch.py
 
 foxglove_bridge runs as a systemd service (autostarts on boot) and serves a
 WebSocket at ws://<pi-ip>:8765 — view /scan, the camera feed, etc. by
