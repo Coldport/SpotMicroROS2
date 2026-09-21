@@ -1,5 +1,11 @@
-# Stable /dev/spotmicro_cam symlink for the robot's USB webcam, regardless of
-# which /dev/videoN it enumerates as (or which order it's detected relative to
-# other video devices). ATTR{index}=="0" picks out the actual capture
-# sub-device of the (composite) UVC camera, not its metadata-only interface.
-KERNEL=="video[0-9]*", ATTRS{idVendor}=="291a", ATTRS{idProduct}=="3369", ATTR{index}=="0", MODE:="0666", SYMLINK+="spotmicro_cam"
+# Permissions for the robot's Intel RealSense D405 depth camera (USB ID 8086:0b5b).
+#
+# The D405 enumerates as a composite UVC device that shows up as six
+# /dev/videoN nodes (depth, color, and their metadata nodes) and whose exact
+# numbers shift with whatever else is plugged in, so there is no useful stable
+# symlink to make here — realsense2_camera finds the camera by USB ID/serial
+# instead. What it does need is read/write access to those nodes and to the raw
+# USB device (for control transfers and firmware tools like rs-fw-update)
+# without running as root.
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b5b", MODE:="0666"
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b5b", MODE:="0666"

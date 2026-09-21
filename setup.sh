@@ -20,14 +20,15 @@
 #      .venv/bin/python3 (Servo_calib.py, test_IK.py).
 #   4. Adds your user to the "dialout", "i2c", and "video" groups so
 #      PCA9685/servo scripts (Servo_calib.py, test_IK.py) can open
-#      /dev/gpiochip4 and /dev/i2c-1, and the usb_cam driver can open the
-#      camera's /dev/videoN, all without sudo.
+#      /dev/gpiochip4 and /dev/i2c-1, and the RealSense driver can probe the
+#      /dev/videoN nodes, all without sudo.
 #   5. Installs the sllidar_ros2 udev rule so the RPLIDAR A2M12 always shows
 #      up at the stable path /dev/rplidar instead of a shifting /dev/ttyUSBx.
 #   6. Installs and enables a systemd service that runs foxglove_bridge
 #      (ROS2 WebSocket server for viewing /scan etc. from a browser) on boot.
-#   7. Installs ros-jazzy-usb-cam and the spot_micro_camera udev rule so the
-#      robot's USB webcam always shows up at the stable path /dev/spotmicro_cam.
+#   7. Installs ros-jazzy-realsense2-camera (which pulls in librealsense2 and
+#      the rs-* tools) and the spot_micro_camera udev rule so the robot's
+#      Intel RealSense D405 can be opened without sudo.
 #
 # Safe to re-run any time.
 #
@@ -154,15 +155,15 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. USB webcam (Anker PowerConf C200) — usb_cam driver + udev rule
+# 7. Intel RealSense D405 depth camera — realsense2_camera driver + udev rule
 # ---------------------------------------------------------------------------
 CAMERA_RULE_SRC="$REPO_DIR/src/spot_micro_camera/udev/spotmicro_cam.rules"
 CAMERA_RULE_DST="/etc/udev/rules.d/spotmicro_cam.rules"
 if command -v ros2 >/dev/null 2>&1 || [ -d /opt/ros ]; then
-    log "Installing usb_cam driver"
-    sudo apt-get install -y ros-jazzy-usb-cam
+    log "Installing realsense2_camera driver"
+    sudo apt-get install -y ros-jazzy-realsense2-camera
 else
-    warn "ROS2 not found at /opt/ros — skipping usb_cam driver install"
+    warn "ROS2 not found at /opt/ros — skipping realsense2_camera driver install"
 fi
 
 if [ -f "$CAMERA_RULE_SRC" ]; then
@@ -202,7 +203,7 @@ Quick hardware checks once your session is refreshed:
     i2cdetect -y 1          # should show your PCA9685 (default 0x40, plus 0x70 all-call)
                              # and the BNO055 IMU (default 0x28)
     ls -l /dev/rplidar      # should exist once the RPLIDAR A2M12 is plugged in
-    ls -l /dev/spotmicro_cam  # should exist once the USB camera is plugged in
+    rs-enumerate-devices -s # should list "RealSense D405" once it's plugged into a USB 3 port
 
 Build and launch the RPLIDAR driver:
     source /opt/ros/jazzy/setup.bash

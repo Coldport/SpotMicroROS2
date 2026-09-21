@@ -30,6 +30,7 @@ _QUA_DATA = 0x20
 _LIA_DATA = 0x28   # linear acceleration: gravity-compensated
 _TEMP = 0x34
 _CALIB_STAT = 0x35
+_SYS_ERR = 0x3A
 _SYS_TRIGGER = 0x3F
 _UNIT_SEL = 0x3B
 _OPR_MODE = 0x3D
@@ -63,6 +64,17 @@ class Bno055:
                 f'Unexpected chip ID 0x{chip_id:02x} at I2C address 0x{address:02x} '
                 f'(expected 0x{_EXPECTED_CHIP_ID:02x} for a BNO055)')
 
+        # Force a full soft reset (equivalent to power-on-reset) before
+        # configuring. Without this, a chip left mid-init by a previous run
+        # that got killed (e.g. `ros2 launch` interrupted right after this
+        # constructor started writing registers) can come up in a state
+        # where SYS_ERR reports a "fusion algorithm configuration error"
+        # (datasheet Table 4-33, code 9) — accel/gyro/orientation keep
+        # working, but the magnetometer silently reads all zeros. Cheap
+        # enough to always pay the ~1s reset+reboot cost and start clean.
+        self._write(_SYS_TRIGGER, 0x20)
+        time.sleep(_BOOT_DELAY_S)
+
         self._write(_OPR_MODE, _MODE_CONFIG)
         time.sleep(_MODE_SWITCH_DELAY_S)
         self._write(_PAGE_ID, 0x00)
@@ -71,6 +83,12 @@ class Bno055:
         self._write(_UNIT_SEL, _UNIT_SEL_GYRO_RPS)
         self._write(_OPR_MODE, _MODE_NDOF)
         time.sleep(_MODE_SWITCH_DELAY_S)
+
+        sys_err = self._bus.read_byte_data(self._address, _SYS_ERR)
+        if sys_err != 0x00:
+            raise RuntimeError(
+                f'BNO055 SYS_ERR=0x{sys_err:02x} after init (datasheet Table 4-33) — '
+                'power-cycle the sensor and try again')
 
     def _write(self, register, value):
         self._bus.write_byte_data(self._address, register, value)
