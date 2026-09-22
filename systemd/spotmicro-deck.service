@@ -1,0 +1,21 @@
+[Unit]
+Description=SpotMicro Steam Deck bridge (hold L1+R1 on the Deck for 3 s to start or stop the robot stack)
+Wants=network-online.target mosquitto.service
+After=network-online.target mosquitto.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO_DIR__
+# Sources ROS and this workspace, then runs deck_bridge + stack_launcher. It does
+# not start the sensors or anything that moves the robot; stack_launcher does
+# that when the Deck asks for it.
+ExecStart=/bin/bash -c 'source /opt/ros/jazzy/setup.bash; source __REPO_DIR__/install/setup.bash; exec ros2 launch spot_micro_deck deck.launch.py'
+Restart=on-failure
+RestartSec=5
+# On stop, stack_launcher shuts the robot stack down with SIGINT first so the
+# LiDAR motor stops cleanly; give it time.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

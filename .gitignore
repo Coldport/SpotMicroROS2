@@ -19,3 +19,5 @@ Thumbs.db
 
 .venv/
 src/sllidar_ros2/
+# Steam Deck app (Rust) build output
+steamdeck_app/target/

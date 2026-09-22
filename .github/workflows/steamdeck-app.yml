@@ -1,0 +1,32 @@
+name: Steam Deck app
+
+# Builds the Rust Steam Deck app for x86_64 Linux (what the Deck runs) and
+# uploads the binary as a build artifact you can download and copy to the Deck.
+on:
+  push:
+    paths:
+      - 'steamdeck_app/**'
+      - '.github/workflows/steamdeck-app.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    # Deliberately an older Ubuntu: the binary links the build machine's glibc,
+    # and an older one runs on more systems (SteamOS included).
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: steamdeck_app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install SDL2 development files
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
+      - name: Test
+        run: cargo test --release
+      - name: Build
+        run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spotmicro-deck-x86_64
+          path: steamdeck_app/target/release/spotmicro-deck

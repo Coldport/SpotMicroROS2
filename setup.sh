@@ -32,6 +32,12 @@
 #   8. Installs ros-jazzy-slam-toolbox, ros-jazzy-nav2-map-server (slam_toolbox's
 #      save_map service shells out to it) and ros-jazzy-xacro, which the
 #      spot_micro_bringup launch (URDF TF + sensors + SLAM) depends on.
+#   9. Installs the Mosquitto MQTT broker (+ python3-paho-mqtt) and opens it to
+#      the LAN, so the Steam Deck app can talk to the robot's deck_bridge node.
+#  10. Installs and enables a systemd service that starts deck_bridge (plus the
+#      stack_launcher) on boot, and sources this workspace from ~/.bashrc. Holding
+#      L1+R1 on the Deck for 3 s then starts the robot sensing stack, or stops it
+#      if it is running.
 #
 # Safe to re-run any time.
 #
@@ -194,6 +200,59 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 9. Steam Deck link — Mosquitto MQTT broker, opened to the LAN
+# ---------------------------------------------------------------------------
+MQTT_CONF_SRC="$REPO_DIR/src/spot_micro_deck/config/mosquitto-spotmicro.conf"
+MQTT_CONF_DST="/etc/mosquitto/conf.d/spotmicro.conf"
+log "Installing Mosquitto MQTT broker and python3-paho-mqtt"
+sudo apt-get install -y mosquitto mosquitto-clients python3-paho-mqtt python3-opencv python3-numpy
+if [ -f "$MQTT_CONF_SRC" ]; then
+    log "Installing Mosquitto LAN config ($MQTT_CONF_DST)"
+    if sudo cmp -s "$MQTT_CONF_SRC" "$MQTT_CONF_DST" 2>/dev/null; then
+        echo "  already installed"
+    else
+        sudo cp "$MQTT_CONF_SRC" "$MQTT_CONF_DST"
+        sudo systemctl enable mosquitto
+        sudo systemctl restart mosquitto
+        echo "  installed, broker restarted (listening on port 1883, no password — see the"
+        echo "  warning in $MQTT_CONF_SRC before letting the Deck drive the robot)"
+    fi
+else
+    warn "src/spot_micro_deck not found — skipping Mosquitto LAN config"
+fi
+
+# ---------------------------------------------------------------------------
+# 10. Deck bridge service (autostart on boot) + workspace sourced in ~/.bashrc
+# ---------------------------------------------------------------------------
+DECK_UNIT_SRC="$REPO_DIR/systemd/spotmicro-deck.service"
+DECK_UNIT_DST="/etc/systemd/system/spotmicro-deck.service"
+if [ -f "$DECK_UNIT_SRC" ]; then
+    log "Installing spotmicro-deck systemd service"
+    RENDERED_UNIT="$(mktemp)"
+    sed -e "s|__USER__|$USER|g" -e "s|__REPO_DIR__|$REPO_DIR|g" \
+        "$DECK_UNIT_SRC" > "$RENDERED_UNIT"
+    if sudo cmp -s "$RENDERED_UNIT" "$DECK_UNIT_DST" 2>/dev/null; then
+        echo "  already installed"
+    else
+        sudo cp "$RENDERED_UNIT" "$DECK_UNIT_DST"
+        sudo systemctl daemon-reload
+        sudo systemctl enable spotmicro-deck.service
+        echo "  installed and enabled (starts on boot; start it now with:"
+        echo "  sudo systemctl start spotmicro-deck). Needs the workspace built first."
+        echo "  Stop any hand-started robot.launch.py before starting it."
+    fi
+    rm -f "$RENDERED_UNIT"
+else
+    warn "systemd/spotmicro-deck.service not found — skipping"
+fi
+
+WS_SOURCE_LINE="[ -f \"$REPO_DIR/install/setup.bash\" ] && source \"$REPO_DIR/install/setup.bash\"  # SpotMicroROS2 workspace"
+if [ -f "$HOME/.bashrc" ] && ! grep -qF "# SpotMicroROS2 workspace" "$HOME/.bashrc"; then
+    log "Sourcing the workspace from ~/.bashrc"
+    printf '%s\n' "$WS_SOURCE_LINE" >> "$HOME/.bashrc"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 log "Done."
@@ -242,6 +301,14 @@ SLAM — does not start the gait controller or move the robot):
     colcon build
     source install/setup.bash
     ros2 launch spot_micro_bringup robot.launch.py
+
+The spotmicro-deck service starts the Deck bridge on boot; hold L1+R1 on the Deck
+for 3 s and it launches robot.launch.py for you (deck:=false, sensing only); hold
+them again to stop it.
+robot.launch.py also starts its own bridge, unless one is already running. Watch
+its MQTT traffic, or the controller input it publishes, with:
+    mosquitto_sub -h localhost -t 'spotmicro/#' -v | cut -c1-120
+    ros2 topic echo /spotmicro_deck/joy
 
 foxglove_bridge runs as a systemd service (autostarts on boot) and serves a
 WebSocket at ws://<pi-ip>:8765 — view /scan, the camera feed, etc. by

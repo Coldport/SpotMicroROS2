@@ -9,6 +9,7 @@ Starts:
   realsense2_camera      — D405 color + depth (/spotmicro_cam/d405/...)
   static odom -> base_link — identity, stands in for real odometry
   slam_toolbox           — 2D lidar SLAM, publishes /map and map -> odom
+  deck_bridge            — MQTT bridge to the Steam Deck app (streams + /spotmicro_deck/joy)
 
 It does not start gait_controller or anything that moves the robot. When the
 gait controller is running it publishes the real odom -> base_link, so launch
@@ -16,6 +17,7 @@ this with static_odom:=false to avoid two publishers of the same transform.
 """
 
 import os
+import subprocess
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -34,6 +36,19 @@ def _include(package, launch_file, condition=None, launch_arguments=None):
             os.path.join(get_package_share_directory(package), 'launch', launch_file)),
         condition=condition,
         launch_arguments=(launch_arguments or {}).items())
+
+
+def _bridge_already_running():
+    """True if a deck_bridge is up (e.g. the spotmicro-deck boot service).
+
+    The bridge uses a fixed MQTT client id, so a second one would keep kicking the
+    first off the broker.
+    """
+    try:
+        return subprocess.run(['pgrep', '-f', 'spot_micro_deck/deck_bridge'],
+                              capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def generate_launch_description():
@@ -57,6 +72,11 @@ def generate_launch_description():
             'camera', default_value='true', description='Start the RealSense D405 driver'),
         DeclareLaunchArgument(
             'slam', default_value='true', description='Start slam_toolbox'),
+        DeclareLaunchArgument(
+            'deck', default_value='false' if _bridge_already_running() else 'true',
+            description='Start the Steam Deck bridge (needs the Mosquitto broker running). '
+                        'Defaults to false when a bridge is already running, e.g. the '
+                        'spotmicro-deck boot service.'),
         DeclareLaunchArgument(
             'static_odom', default_value='true',
             description='Publish a static identity odom -> base_link. Set false when '
@@ -86,6 +106,9 @@ def generate_launch_description():
 
         _include('spot_micro_camera', 'camera.launch.py',
                  condition=IfCondition(LaunchConfiguration('camera'))),
+
+        _include('spot_micro_deck', 'deck.launch.py',
+                 condition=IfCondition(LaunchConfiguration('deck'))),
 
         # slam_toolbox's own launch file defaults use_sim_time to TRUE, which on
         # real hardware makes it wait forever for a simulated /clock.

@@ -283,6 +283,147 @@ ros2 service call /slam_toolbox/save_map slam_toolbox/srv/SaveMap "{name: {data:
 installs it) — slam_toolbox doesn't declare that dependency, and without it the call fails with
 `result=255`.
 
+## Steam Deck app
+
+`steamdeck_app/` is a native app (Rust + SDL2 — no Python, no runtime to install) that runs on the
+Steam Deck, including in Gaming Mode. It shows the robot's camera as the main display with status
+readouts, the SLAM map as a minimap in the lower-left (like a game HUD), and sends the Deck's
+controller input back to the robot. **L2 cycles the main view: camera → depth → lidar → map.**
+
+```
+Steam Deck app ──MQTT──► Mosquitto broker (on the robot) ◄──► deck_bridge node ◄──► ROS2
+```
+
+The Deck has no ROS, so everything goes through an MQTT broker on the robot and the
+`spot_micro_deck` package's `deck_bridge` node translates to/from ROS topics. Camera and lidar
+subscriptions (and depth colourising) only run while a Deck is connected and looking at that view,
+so an idle robot pays nothing for it.
+
+### Robot side
+
+`./setup.sh` installs Mosquitto (opened to the LAN, port 1883) and the Python MQTT library. On
+the robot the bridge normally comes up by itself, see "Starting on boot" below. If no bridge is
+running, `robot.launch.py` starts one with everything else (`deck:=false` to skip it). Check it's
+alive from the robot:
+
+```
+mosquitto_sub -h localhost -t 'spotmicro/#' -v | cut -c1-120   # all traffic
+ros2 topic echo /spotmicro_deck/joy                            # the Deck's controller input
+```
+
+### Starting on boot, and launching from the Deck
+
+`setup.sh` installs and enables `spotmicro-deck.service` (from `systemd/`). On every boot the Pi
+starts Mosquitto (already a service), then `deck.launch.py`: the `deck_bridge` plus a small
+`stack_launcher` node. It starts **no sensors and nothing that moves**. The workspace is also
+sourced from `~/.bashrc`, so new terminals have it.
+
+Once the Deck app is connected, **hold L1 + R1 together for 3 seconds** and `stack_launcher` runs
+`ros2 launch spot_micro_bringup robot.launch.py deck:=false`: LiDAR, IMU, camera and SLAM, sensing
+only. **Hold them again for 3 seconds to stop it.** The chord is a toggle, and it only stops the
+stack it started itself. Notes:
+
+- Releasing either button restarts the 3 s; holding on afterwards does not launch twice.
+- It refuses if a `robot.launch.py` is already running (say, one you started by hand), because two
+  stacks fight over the LiDAR, IMU and camera. The reason is in the journal.
+- If the stack exits or crashes, hold the buttons again to relaunch it.
+- `robot.launch.py` defaults `deck` to false while a bridge is already running, so launching it by
+  hand doesn't start a second one (the bridge's MQTT client id is fixed and two would keep kicking
+  each other off the broker).
+- Stopping the stack sends it Ctrl-C (so the LiDAR motor stops cleanly), then SIGTERM after 20 s
+  and SIGKILL 5 s later if it is stuck. The bridge keeps running, so the Deck stays connected and
+  the same chord starts it again.
+- It never stops a `robot.launch.py` you started by hand; stop that with Ctrl-C in its terminal.
+- Restarting the service (`sudo systemctl restart spotmicro-deck`) also shuts a Deck-launched stack
+  down cleanly.
+- Follow it with `journalctl -u spotmicro-deck -f`.
+
+**Security:** `setup.sh` sets the broker to `allow_anonymous true` — anyone on your network can view
+the streams and publish fake controller input. Fine on a private network while the robot can't
+move; before the Deck drives the gait controller, enable a password (steps are in
+`src/spot_micro_deck/config/mosquitto-spotmicro.conf`; `deck_params.yaml` and the app both accept a
+username/password).
+
+### Getting the app onto the Deck
+
+The Deck is x86_64, so it needs an x86_64 build — a build made on the Pi is aarch64 and only runs
+on the Pi. **Building on the Deck itself doesn't work out of the box:** SteamOS ships no C
+compiler, `pkg-config` or SDL2 headers (`cargo build` there fails with ``linker `cc` not found``),
+and its root filesystem is read-only. Rather than modifying SteamOS, cross-compile from the Pi (or
+any Linux machine) with `steamdeck_app/cross_build_x86_64.sh`. It downloads Zig (checksum-verified,
+cached in `~/.cache/spotmicro-zig`) purely as a linker and links against a copy of the Deck's own
+SDL2:
+
+```
+ssh deck@<deck-ip> 'cat /usr/lib/libSDL2-2.0.so.0' > libSDL2-2.0.so.0
+cd steamdeck_app && ./cross_build_x86_64.sh ../libSDL2-2.0.so.0
+# -> steamdeck_app/target/x86_64-unknown-linux-gnu/release/spotmicro-deck
+```
+
+This is how the current build was made and it runs on a Steam Deck (SteamOS 3.8, Desktop Mode).
+Alternatives: the GitHub workflow `.github/workflows/steamdeck-app.yml` builds it on push (untested),
+or `steamdeck_app/build.sh` on an x86_64 PC with Rust and `libsdl2-dev`.
+
+Copy `spotmicro-deck` and `install_on_deck.sh` to the Deck and, in a Desktop Mode terminal, run
+`./install_on_deck.sh <robot-ip>`. Then in Steam: **Games → Add a Non-Steam Game to My Library →
+SpotMicro**. It appears in your Gaming Mode library. If L2 doesn't respond, make sure the game's
+controller layout is a Gamepad template (not Keyboard/Mouse).
+
+The robot's address comes from, in order: `--host` in the game's Launch Options,
+`$SPOTDECK_HOST`, `~/.config/spotmicro-deck/host`, else `spotmicro.local` (that name may not
+resolve from the Deck — using the robot's IP is safer). Also `--port`, `--user`, `--password`, `--prefix`, `--windowed`.
+Until it connects, the screen says why (broker unreachable + the error, or robot offline).
+
+### Controls and what the robot receives
+
+Only L2 does something in the app itself (Tab/Space also cycle views on a keyboard). Everything else
+is published for later use on **`/spotmicro_deck/joy`** (`sensor_msgs/Joy`, ~30 Hz, header frame
+`deck`) — the gait/teleop code can subscribe to it. It publishes all zeros if the Deck disconnects
+or goes quiet for 0.5 s, and `/spotmicro_deck/connected` (`std_msgs/Bool`) says whether a Deck is
+connected.
+
+| `Joy.axes[i]` | 0 | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|---|
+| meaning | left stick X | left stick Y | right stick X | right stick Y | L2 | R2 |
+
+Sticks are −1..1 with **left and up positive** (ROS convention); triggers are 0..1 (0 released) —
+not the inverted −1..1 of ROS's xbox joy driver.
+
+`Joy.buttons[i]`, 1 = pressed: `0 a`, `1 b`, `2 x`, `3 y`, `4 l1`, `5 r1`, `6 back`, `7 start`,
+`8 guide`, `9 l3`, `10 r3`, `11 dpad_up`, `12 dpad_down`, `13 dpad_left`, `14 dpad_right`,
+`15-18 paddle1-4` (the Deck's back buttons: SDL's P1/P2 are the right/left upper R4/L4, P3/P4 the
+right/left lower R5/L5), `19 l2`, `20 r2` (digital copies of the triggers). The same names are in
+`src/spot_micro_deck/spot_micro_deck/protocol.py`, which defines all the MQTT topics and payloads.
+
+### What has and hasn't been tested
+
+Tested on the Pi with the real lidar, IMU, D405 and SLAM running: the robot side end to end over
+MQTT (streams, view switching, joystick → `/joy`, last-will/neutral-on-disconnect), the app's
+rendering of all four views and its not-connected screens (via SDL's dummy video driver and
+screenshots), and the L2/stick/button logic and wire parsing in unit tests (`cargo test`,
+`pytest src/spot_micro_deck/test`).
+
+Also tested **on a real Steam Deck** (SteamOS 3.8, Desktop Mode), over Wi-Fi, against the running
+robot stack: the x86_64 binary starts, SDL2 finds the Deck's controller, L2 cycles all four views,
+and the app receives about 20 fps of camera or depth video plus the map, scan and status. That run
+used SDL's dummy video driver (no window) so it was screenshotted, not watched on screen.
+
+**Not tested:** Gaming Mode itself, Steam Input's layouts, physical L2/paddle presses (input was
+scripted, apart from resting stick noise that arrived from the real controller), the GitHub
+workflow, and the app's actual on-screen rendering on the Deck's GPU. Expect to adjust things on
+first contact.
+
+**Wi-Fi:** the video needs roughly 6-7 Mbps. It worked over the Deck's 2.4 GHz link in testing, but
+that's close to what that link can carry; if it stutters, use 5 GHz, or lower `video_max_fps` /
+`jpeg_quality` in `deck_params.yaml`. Wi-Fi power-save on the Deck can also add lag.
+
+**Don't run two robot stacks at once.** Each `sllidar_node` stops the lidar motor when it shuts
+down, so a second `robot.launch.py` (even one that fails to start) can silence the lidar for the
+first, and two `deck_bridge` nodes will kick each other off the broker.
+
+The `lidar` view draws the robot's front pointing up, assuming the laser's 0° is the robot's front
+(`lidar_yaw` in the URDF — see the bringup section).
+
 ## IMU (Adafruit BNO055, 9-DOF absolute orientation)
 
 `src/spot_micro_imu` is a custom driver node for the

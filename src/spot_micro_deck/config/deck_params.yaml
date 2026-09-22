@@ -1,0 +1,28 @@
+/**:
+    ros__parameters:
+      # The Mosquitto broker runs on the robot, so the bridge talks to localhost.
+      # The Steam Deck connects to the same broker over the network.
+      mqtt_host: "localhost"
+      mqtt_port: 1883
+      # Leave empty unless you've enabled a password on the broker (see README).
+      mqtt_username: ""
+      mqtt_password: ""
+      topic_prefix: "spotmicro"
+
+      color_topic: "/spotmicro_cam/d405/color/image_raw/compressed"
+      depth_topic: "/spotmicro_cam/d405/depth/image_rect_raw"
+      scan_topic: "/scan"
+      map_topic: "/map"
+      imu_topic: "/spotmicro_imu/imu/data"
+      map_frame: "map"
+      base_frame: "base_link"
+
+      jpeg_quality: 70
+      video_max_fps: 20.0
+      scan_rate_hz: 10.0
+      state_rate_hz: 5.0
+      # Depth view colour range: near = warm, far = cool, no reading = black.
+      depth_min_m: 0.1
+      depth_max_m: 2.0
+      # Publish an all-zero Joy if the Deck is connected but silent this long.
+      input_timeout_s: 0.5
