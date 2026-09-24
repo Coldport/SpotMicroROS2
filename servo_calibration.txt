@@ -23,8 +23,8 @@
         "Hip": {
             "channel": "15",
             "angle": "90",
-            "range": "180",
-            "offset": "7"
+            "range": "270",
+            "offset": "0"
         },
         "Thigh": {
             "channel": "14",
@@ -64,7 +64,7 @@
             "channel": "0",
             "angle": "90",
             "range": "270",
-            "offset": "0"
+            "offset": "7.9"
         },
         "Thigh": {
             "channel": "1",
