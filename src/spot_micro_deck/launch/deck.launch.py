@@ -22,7 +22,8 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'stack_launcher', default_value='true',
             description='Also run stack_launcher: hold L1+R1 on the Deck for 3 s to start, or '
-                        'stop, the robot sensing stack (robot.launch.py)'),
+                        'stop, the sensing stack + gait node (full_stack.launch.py). The gait '
+                        'node still comes up disarmed until L3+R3 is held for 3 s.'),
 
         Node(
             package='spot_micro_deck',

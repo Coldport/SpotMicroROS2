@@ -13,6 +13,14 @@
   <exec_depend>tf2_ros_py</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
+  <!-- full_stack.launch.py (run by stack_launcher on L1+R1) includes spot_micro_bringup and
+       spot_micro_move at runtime, but both of those already depend on this package (bringup
+       includes deck.launch.py; spot_micro_move imports spot_micro_deck.protocol/chord), so
+       declaring the reverse here too would be a package.xml dependency cycle. colcon doesn't
+       need it for these pure-Python (ament_python) packages: ros2 launch/Python imports resolve
+       via the ament index and installed site-packages at runtime, independent of package.xml
+       exec_depend, which only affects build ordering. -->
+
 
   <test_depend>python3-pytest</test_depend>
 

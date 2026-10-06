@@ -37,7 +37,11 @@ IK_LEG_NAME = {
 }
 IK_RIGHT_LEG = {"FR", "RR"}  # your from_180=True
 
-CONFIG_FILE = "servo_calibration.txt"
+# Repo-root servo_calibration.txt, regardless of the directory this is launched from
+# (a bare relative path loaded an empty config — every channel 0 — and saved a stray
+# copy when run from inside "Test _and_calib/").
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "servo_calibration.txt")
 
 # Cache of servo objects by (channel, actuation_range)
 servo_objects = {}
@@ -159,7 +163,6 @@ class ServoCalApp:
     def __init__(self, root):
         self.root = root
         root.title("Spot Micro Servo Calibration + IK")
-        root.geometry("1150x780")
 
         self.status_var = tk.StringVar(value="Ready")
         self.config_data = load_config()
@@ -194,17 +197,27 @@ class ServoCalApp:
         self.notebook.add(self.tab_manual, text="Manual")
         self.notebook.add(self.tab_cycle, text="Cycle")
         self.notebook.add(self.tab_ik, text="IK Cycle")
-        self.notebook.pack(fill="both", expand=True)
 
         self._build_manual_tab()
         self._build_cycle_tab()
         self._build_ik_tab()
 
-        # Bottom bar
+        # Bottom bar — packed before the notebook so it's never the part that
+        # gets squeezed off-screen if the window ends up smaller than its content.
         bottom = ttk.Frame(root)
         bottom.pack(fill="x", side="bottom")
         ttk.Button(bottom, text="Save Config", command=self.on_save).pack(side="right", padx=8, pady=6)
         ttk.Label(bottom, textvariable=self.status_var, relief="sunken", anchor="w").pack(side="left", fill="x", expand=True)
+        self.notebook.pack(fill="both", expand=True)
+
+        # Size the window to fit its content (capped to the screen, leaving
+        # room for the title bar / menu bar) instead of a fixed size that
+        # clipped the right-hand legs on smaller screens.
+        root.update_idletasks()
+        w = min(root.winfo_reqwidth(), root.winfo_screenwidth() - 20)
+        h = min(root.winfo_reqheight(), root.winfo_screenheight() - 60)
+        root.geometry(f"{w}x{h}")
+        root.minsize(min(w, 900), min(h, 600))
 
         # Schedule updates (frame-synced)
         self._schedule_tick()

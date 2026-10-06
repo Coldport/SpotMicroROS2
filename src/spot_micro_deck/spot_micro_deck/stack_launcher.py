@@ -5,10 +5,16 @@ stack_launcher — starts and stops the robot sensing stack from the Steam Deck.
 Runs on the robot at boot next to deck_bridge. When a Deck is connected and its
 L1 + R1 buttons are held together for `hold_s` seconds it toggles the stack:
 if it isn't running it runs `command` (by default:
-`ros2 launch spot_micro_bringup robot.launch.py deck:=false`, the sensing stack
-without a second bridge); if the stack this node started is running it shuts it
-down (SIGINT, like Ctrl-C). The bridge itself keeps running, so the Deck stays
-connected and can start the stack again.
+`ros2 launch spot_micro_deck full_stack.launch.py`, the sensing stack plus
+spot_micro_move's gait node); if the stack this node started is running it
+shuts it down (SIGINT, like Ctrl-C). The bridge itself keeps running, so the
+Deck stays connected and can start the stack again.
+
+The gait node this starts opens the real I2C/PCA9685 bus immediately but stays
+disarmed (nothing moves) until the Deck separately holds L3+R3 for 3s — see
+spot_micro_move/gait_node.py.
+L1+R1 only controls whether that node (and the rest of the sensing stack)
+exists at all, not whether it's driving servos.
 
 It never launches while another robot.launch.py is already running, because two
 stacks fight over the LiDAR, IMU and camera, and it never stops a stack it did
@@ -18,9 +24,6 @@ Subscribes (relative to the node's namespace, /spotmicro_deck when launched from
 deck.launch.py):
   joy        sensor_msgs/Joy   from deck_bridge; buttons[4]=L1, buttons[5]=R1
   connected  std_msgs/Bool     True while a Deck is connected (latched)
-
-This does not start the gait controller or anything that moves the robot; that
-is up to `command`, which is sensing-only by default.
 """
 
 import os
@@ -49,9 +52,11 @@ class StackLauncher(Node):
         self.declare_parameter('hold_s', 3.0)
         self.declare_parameter('buttons', [_L1, _R1])
         self.declare_parameter(
-            'command', ['ros2', 'launch', 'spot_micro_bringup', 'robot.launch.py', 'deck:=false'])
+            'command', ['ros2', 'launch', 'spot_micro_deck', 'full_stack.launch.py'])
         # pgrep -f pattern for "the stack is already up"; launching is refused if it matches.
-        self.declare_parameter('busy_pattern', 'robot.launch.py')
+        # Matches both this node's own combined launch and a bare robot.launch.py started by
+        # hand, since either one is already using the LiDAR/IMU/camera.
+        self.declare_parameter('busy_pattern', 'robot.launch.py|full_stack.launch.py')
         self.declare_parameter('shutdown_timeout_s', 20.0)
 
         self._command = list(p('command').value)
