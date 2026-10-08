@@ -35,8 +35,8 @@ up alongside the sensing stack, but — per the above — that alone never moves
 a servo until L3+R3 is held too.
 
 GAIT: `gait_type` "crawl" (default) lifts one leg at a time in the order
-RL -> FL -> RR -> FR, so three feet are always on the ground; each leg swings
-for 1/4 of the cycle. "trot" is the old diagonal-pair gait (FL+RR, FR+RL),
+RL -> FL -> RR -> FR, so three feet are always on the ground; each leg gets
+1/4 of the cycle (body shift, then swing — see BALANCE SHIFT). "trot" is the old diagonal-pair gait (FL+RR, FR+RL),
 swinging for 1/2 of the cycle.
 
 STANCE: feet sit a little outside the hips (`stance_y`), front feet a little
@@ -50,6 +50,21 @@ command for that leg, to compensate for static build/calibration error (e.g.
 the front sitting low under the camera's weight, or one corner sitting
 forward/high). z: + = extend the leg = raise that corner. y: + = foot further
 out. x: same sign convention as `stance_x_front` / `stance_x_rear`.
+
+BALANCE SHIFT: with three feet down, the body's centre of mass sits right on
+the diagonal between two of them, so lifting the fourth tips it over that
+diagonal. Before each leg lifts, the body slides toward the centroid of the
+three feet that stay down (away from the lifted leg). Each leg's gait slot
+starts with `shift_frac` of four-feet-down time while the body moves to the
+next leg's target, then the leg swings while the body holds there. The slide
+also spills `shift_overlap` (fraction of a swing) into the low ends of the
+neighbouring swings and follows a quintic ease, so the sway is slow and has
+no jerk at its start or end.
+Target = gain * (centroid of the other three feet), using `level_half_length`
+/ `level_half_width` as the foot rectangle; `balance_gain_lateral` and
+`balance_gain_fore_aft` scale it, `balance_max_shift` clamps it (mm). Fore/aft
+uses `ik_x_forward_sign` to map body-forward onto IK x. Crawl only (trot has
+two feet down on a diagonal, which a body shift can't help).
 
 SETTLE: when the sticks centre, feet don't snap to the stand pose — each foot
 moves toward it at no more than `settle_speed` mm/s, so a leg that was up
@@ -80,7 +95,8 @@ from spot_micro_ik.dog import DEFAULT_STAND_POSE
 _AX = {name: i for i, name in enumerate(AXIS_NAMES)}
 _BTN = {name: i for i, name in enumerate(BUTTON_NAMES)}
 
-# gait_type -> (per-leg phase offset in the cycle, fraction of the cycle spent in swing).
+# gait_type -> (per-leg phase offset in the cycle, fraction of the cycle in each leg's slot).
+# In crawl, the first `shift_frac` of a slot is four-feet-down body shift, the rest swing.
 # crawl: one leg in the air at a time, in the standard quadruped walk order
 #        (rear then front on the same side: RL, FL, RR, FR).
 # trot:  diagonal pairs swing together.
@@ -116,6 +132,7 @@ class GaitNode(Node):
         self.declare_parameter('arm_leg_stagger_s', 0.4)  # delay between legs powering up on arm
         self.declare_parameter('joy_timeout_s', 0.5)
         self.declare_parameter('control_hz', 50.0)
+        self.declare_parameter('servo_pwm_hz', 50)         # PCA9685 PWM rate; servos see one update per PWM frame
         self.declare_parameter('stick_deadzone', 0.08)
 
         self.declare_parameter('stand_z', DEFAULT_STAND_POSE['z'])
@@ -125,6 +142,13 @@ class GaitNode(Node):
         self.declare_parameter('turn_gain', 25.0)         # mm of extra stride per side at full turn stick
         self.declare_parameter('gait_freq', 1.0)          # full step cycles per second at any commanded speed
         self.declare_parameter('gait_type', 'crawl')      # 'crawl' (one leg at a time) or 'trot'
+        self.declare_parameter('shift_frac', 0.35)        # fraction of each leg's slot with 4 feet down, shifting body
+        self.declare_parameter('shift_overlap', 0.4)      # fraction of a swing the body slide may spill into
+        self.declare_parameter('balance_enabled', True)
+        self.declare_parameter('balance_gain_lateral', 1.0)   # x centroid of the 3 support feet, side to side
+        self.declare_parameter('balance_gain_fore_aft', 0.0)  # x centroid, front/back (needs ik_x_forward_sign right)
+        self.declare_parameter('balance_max_shift', 40.0)     # mm clamp per axis
+        self.declare_parameter('ik_x_forward_sign', -1.0)     # +1 if IK +x is body-forward, -1 if backward
 
         # Neutral foot placement (mm, per-leg IK frame: +x forward, +y away from the body).
         self.declare_parameter('stance_x_front', 50.0)    # front feet this far ahead of their hips
@@ -170,7 +194,18 @@ class GaitNode(Node):
         gait_type = str(p('gait_type').value)
         if gait_type not in GAITS:
             raise ValueError(f"gait_type '{gait_type}' not in {list(GAITS)}")
-        self._gait_offsets, self._swing_frac = GAITS[gait_type]
+        self._gait_offsets, self._slot_frac = GAITS[gait_type]
+        # Trot keeps its old timing: no four-feet-down shift window.
+        self._shift_frac = min(max(float(p('shift_frac').value), 0.0), 0.9) if gait_type == 'crawl' else 0.0
+        self._shift_overlap = min(max(float(p('shift_overlap').value), 0.0), 0.5)
+        self._swing_start = self._slot_frac * self._shift_frac   # leg-local phase where swing begins
+        # Legs in the order they swing, for looking up the previous slot's shift target.
+        self._swing_order = sorted(self._gait_offsets, key=self._gait_offsets.get)
+        self._balance = bool(p('balance_enabled').value) and gait_type == 'crawl'
+        self._bal_gain_y = float(p('balance_gain_lateral').value)
+        self._bal_gain_x = float(p('balance_gain_fore_aft').value)
+        self._bal_max = float(p('balance_max_shift').value)
+        self._ik_x_sign = 1.0 if float(p('ik_x_forward_sign').value) >= 0 else -1.0
         self._stance_x_front = float(p('stance_x_front').value)
         self._stance_x_rear = float(p('stance_x_rear').value)
         self._stance_y = float(p('stance_y').value)
@@ -205,7 +240,7 @@ class GaitNode(Node):
                 raise ValueError(f"arm_buttons entry '{name}' not in {BUTTON_NAMES}")
 
         self._calibration = load_calibration(p('calibration_path').value)
-        self.dog = Dog(self._calibration, dry_run=False)   # opens I2C now; starts disarmed below
+        self.dog = Dog(self._calibration, dry_run=False, pwm_hz=int(p('servo_pwm_hz').value))   # opens I2C now; starts disarmed below
 
         self._armed = False
         self._arm_chord = ChordDetector([_BTN[n] for n in arm_buttons], arm_hold_s)
@@ -412,6 +447,51 @@ class GaitNode(Node):
 
     # ── gait ─────────────────────────────────────────────────────────────────
 
+    def _shift_target(self, leg):
+        """Body shift (bx forward, by left, mm, body frame) that puts the centre
+        of mass over the three feet left down while `leg` swings: the centroid
+        of the other three corners of the foot rectangle, i.e. -(corner)/3."""
+        sx = 1.0 if leg in FRONT else -1.0
+        sy = 1.0 if leg in LEFT_SIDE else -1.0
+        half_w = self._half_width + self._stance_y
+        bx = -self._bal_gain_x * sx * self._half_length / 3.0
+        by = -self._bal_gain_y * sy * half_w / 3.0
+        lim = self._bal_max
+        return max(-lim, min(lim, bx)), max(-lim, min(lim, by))
+
+    def _body_shift(self, phase, period):
+        """Scheduled body shift for this gait phase. Each slot's slide runs
+        across its four-feet-down window AND spills `shift_overlap` of a swing
+        into the neighbouring swings (the last bit of the previous leg's swing,
+        the first bit of this one's), where the foot is barely off the ground.
+        The longer window plus a quintic (smootherstep) profile keeps the
+        body's acceleration low and its jerk zero at both ends, so the sway
+        eases in and out rather than lurching. The very first slot after
+        starting to walk slides from zero (the body starts centred)."""
+        if not self._balance:
+            return 0.0, 0.0
+        n = len(self._swing_order)
+        k = int(phase / self._slot_frac) % n
+        u = (phase - self._gait_offsets[self._swing_order[k]]) / self._slot_frac   # 0..1 in slot
+        a = self._shift_frac
+        ov = self._shift_overlap * (1.0 - a)                # overlap, in slot units
+        first_slot = self._t < self._slot_frac * period
+        if u > 1.0 - ov:
+            # Tail of this leg's swing: the next slot's slide has started.
+            frm = self._shift_target(self._swing_order[k])
+            to = self._shift_target(self._swing_order[(k + 1) % n])
+            x = (u - 1.0 + ov) / (a + 2.0 * ov)
+        else:
+            frm = (0.0, 0.0) if first_slot else self._shift_target(self._swing_order[(k - 1) % n])
+            to = self._shift_target(self._swing_order[k])
+            if first_slot:
+                x = u / (a + ov) if a + ov > 0.0 else 1.0
+            else:
+                x = (u + ov) / (a + 2.0 * ov) if a + ov > 0.0 else 1.0
+        x = min(max(x, 0.0), 1.0)
+        x = x * x * x * (x * (6.0 * x - 15.0) + 10.0)      # smootherstep
+        return tuple(f + (t - f) * x for f, t in zip(frm, to))
+
     def _gait_tick(self, vx, vy, wz):
         period = 1.0 / self._gait_freq
         phase = (self._t % period) / period   # 0..1
@@ -419,6 +499,10 @@ class GaitNode(Node):
         stride_x = self._step_length * max(-1.0, min(1.0, vx))
         stride_y = self._step_lateral * max(-1.0, min(1.0, vy))
         turn = self._turn_gain * max(-1.0, min(1.0, wz))
+        bx, by = self._body_shift(phase, period)
+
+        swing_len = self._slot_frac - self._swing_start
+        stance_len = 1.0 - swing_len
 
         feet = {}
         for leg in LEGS:
@@ -429,18 +513,25 @@ class GaitNode(Node):
             leg_stride_y = side * stride_y
 
             local = (phase - self._gait_offsets[leg]) % 1.0
-            swing = self._swing_frac
 
-            if local < swing:
-                sw = local / swing                            # 0..1 across the swing
-                dx = leg_stride_x * (2.0 * sw - 1.0)
-                dy = leg_stride_y * (2.0 * sw - 1.0)
-                dz = -self._step_height * math.sin(math.pi * sw)   # lift (shorten the leg)
+            if self._swing_start <= local < self._slot_frac:
+                sw = (local - self._swing_start) / swing_len   # 0..1 across the swing
+                # Eased so the foot leaves and lands with zero velocity (soft
+                # lift-off and touchdown): cosine ease fore/aft, sin^2 lift.
+                ease = 0.5 - 0.5 * math.cos(math.pi * sw)
+                dx = leg_stride_x * (2.0 * ease - 1.0)
+                dy = leg_stride_y * (2.0 * ease - 1.0)
+                dz = -self._step_height * math.sin(math.pi * sw) ** 2   # lift (shorten the leg)
             else:
-                st = (local - swing) / (1.0 - swing)           # 0..1 across stance
+                st = ((local - self._slot_frac) % 1.0) / stance_len   # 0..1 across stance
                 dx = leg_stride_x * (1.0 - 2.0 * st)
                 dy = leg_stride_y * (1.0 - 2.0 * st)
                 dz = 0.0
+
+            # Moving the body by (bx, by) moves every foot by (-bx, -by) relative
+            # to it. Per-leg IK y is outward, so body-left (+by) is -y on left legs.
+            dx -= self._ik_x_sign * bx
+            dy -= side * by
 
             nx, ny, nz = self._neutral(leg)
             feet[leg] = [nx + dx, ny + dy, nz + dz]

@@ -14,17 +14,18 @@ DEFAULT_STAND_POSE = dict(x=0.0, y=0.0, z=190.0, roll=0.0, pitch=0.0, yaw=0.0)
 
 
 class Dog:
-    def __init__(self, calibration, dry_run=True):
+    def __init__(self, calibration, dry_run=True, pwm_hz=50):
         """
         Args:
             calibration: dict[leg_name] -> LegCal, from calibration.load_calibration().
             dry_run: if True (default), no hardware/I2C is touched — servo
                 writes are only recorded (see hardware.DryRunDriver). Pass
                 False to actually drive the PCA9685.
+            pwm_hz: PCA9685 PWM frequency (servo refresh rate) for real hardware.
         """
         self.legs = {name: Leg(name, calibration[name]) for name in LEG_NAMES}
         self.dry_run = dry_run
-        self.driver = DryRunDriver(calibration) if dry_run else ServoDriver(calibration)
+        self.driver = DryRunDriver(calibration) if dry_run else ServoDriver(calibration, frequency=pwm_hz)
 
     def move_leg(self, leg_name, x, y, z, roll=0.0, pitch=0.0, yaw=0.0):
         """Solve IK for one leg and write its servos. Returns the channel->angle dict sent."""
