@@ -36,6 +36,13 @@
       camera_name: "d405"
       base_frame_id: "link"
       publish_tf: true
+      # JPEG quality of the .../color/image_raw/compressed topic (Foxglove and the
+      # Steam Deck app read it). The driver defaults to 95, which is ~150 KB per
+      # 640x480 frame — far too heavy for Wi-Fi at 15-30 fps. 60 looks fine for a
+      # live view. The parameter name is derived from the node name ("d405") and
+      # the topic, so it changes if either of those does.
+      .d405.color.image_raw.compressed.jpeg_quality: 60
+
       # Keep retrying if the camera is unplugged/brown-outs rather than dying.
       reconnect_timeout: 6.0
       wait_for_device_timeout: -1.0

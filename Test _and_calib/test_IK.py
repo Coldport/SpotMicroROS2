@@ -295,6 +295,12 @@ class Leg:
             self._set_servo_angle(15, np.rad2deg(H_ang))
             self._set_servo_angle(13, np.rad2deg(Th_ang))
             self._set_servo_angle(14, np.rad2deg(An_ang))
+        elif self.leg_name in ["FR"]:
+            # Right side is a mirror of the left: same IK, servo angle = 180 - angle
+            # (same channel-offset pattern as FL, shifted to the FR channels)
+            self._set_servo_angle(12, 180.0 - np.rad2deg(H_ang))
+            self._set_servo_angle(10, 180.0 - np.rad2deg(Th_ang))
+            self._set_servo_angle(11, 180.0 - np.rad2deg(An_ang))
 
     def Create_servo_driver(self):
         i2c = board.I2C()  # uses board.SCL and board.SDA
@@ -379,7 +385,7 @@ class Leg:
         servo.Servo(pca.channels[15],
                 min_pulse=500,
                 max_pulse=2500,
-                actuation_range=180
+                actuation_range=270
             )]
         return servos
 
@@ -437,8 +443,8 @@ def main():
 
     print("Test Trajectory interpolation")
     
-    start_pose = [-50, 10, 200, 0, 0, 0]    # Start: foot below, no rotation
-    end_pose = [-50, -10, 150, 0, 0, 0]   # End: foot forward/right, slight yaw
+    start_pose = [0, 0, 200, 0, 0, 0]    # Start: foot below, no rotation
+    end_pose = [0, 0, 150, 0, 0, 0]   # End: foot forward/right, slight yaw
     steps = 11
     print(f"Interpolating from {start_pose} to {end_pose} in {steps} steps:")
 

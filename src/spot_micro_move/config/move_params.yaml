@@ -1,0 +1,82 @@
+/**:
+    ros__parameters:
+      # Path resolved by move.launch.py to <workspace root>/config/servo_calibration.yaml;
+      # only used as a fallback if you run the node without the launch file.
+      calibration_path: "config/servo_calibration.yaml"
+
+      # I2C/PCA9685 opens at node startup, always live — no dry-run mode. Arming (below)
+      # only gates whether servos actually get commanded.
+      joy_topic: "/spotmicro_deck/joy"
+      height_up_button: "r1"     # hold to raise body (once armed)
+      height_down_button: "l1"   # hold to lower body
+      height_rate: 40.0          # mm/s while held
+      z_min: 100.0               # mm, body height clamp
+      z_max: 220.0
+      estop_button: "b"          # hold to force-disarm and release all servos
+      arm_buttons: ["l3", "r3"]  # hold both stick clicks together to arm/disarm
+      arm_hold_s: 3.0
+      arm_leg_stagger_s: 1.0     # on arm, power legs up one at a time this far apart (limits current surge)
+      joy_timeout_s: 0.5         # no Joy for this long -> force-disarm
+      # Smoothness: intermediate foot points per step = control_hz / gait_freq. The servos
+      # only pick up a new position once per PWM frame, so control_hz above servo_pwm_hz
+      # adds nothing; raise both together. 50 is the standard analog-servo rate; if servos
+      # buzz or run hot at 100, drop both back to 50.
+      control_hz: 100.0          # was 50.0
+      servo_pwm_hz: 100          # was 50 (hardcoded)
+      stick_deadzone: 0.50
+
+      stand_z: 150.0         # mm, starting body height (standing AND stepping) — R1/L1 adjust live
+      step_height: 60.0       # mm foot lift during swing (90 dwarfed the stride — looked like marching in place)
+      step_length: 50.0       # mm max fore/aft stride at full stick (±50; FL thigh clamps at 0° past ~55)
+      step_lateral: 30.0      # mm max lateral stride at full stick (was 500 — threw the legs out of reach)
+      turn_gain: 50.0         # mm of arc each foot sweeps per half stride at full turn stick (feet now follow a circle)
+      max_foot_offset: 60.0   # mm hard clamp on each foot's horizontal stride offset (stride + turn combined)
+      speed_scale: 1.0        # multiplies stick input -> stride (0.5 halved step_length to ±20mm: no net motion)
+      gait_freq: 0.35          # step cycles per second (was 0.50; slowed so the longer shift_frac doesn't shorten the swing)
+      gait_type: "crawl"      # "crawl" = one leg lifted at a time (RL, FL, RR, FR); "trot" = diagonal pairs
+
+      # Balance shift (crawl only): before each leg lifts, slide the body toward the
+      # three feet that stay down so it doesn't tip over the support diagonal.
+      shift_frac: 0.50            # (was 0.35) of each leg's 1/4-cycle slot: 4 feet down while the body shifts; rest = swing
+      shift_overlap: 0.4          # fraction of a swing the body slide spills into (foot barely up then); 0 = old stop-start
+      balance_enabled: true
+      balance_gain_lateral: 0.5   # (was 1.0) 1.0 = all the way to the support-triangle centroid (~32mm side to side)
+      balance_gain_fore_aft: 0.5  # front/back part of the shift (~31mm at 1.0); off until ik_x_forward_sign is confirmed
+      balance_max_shift: 40.0     # mm clamp per axis
+      ik_x_forward_sign: -1.0     # -1 = IK +x points backward (see stance comment below); flip if fore/aft shift goes the wrong way
+
+      # Neutral foot placement (mm). IK frame per leg: +y = away from the body (x sign: see below).
+      # IK +x appears to point BACKWARD (knees are on the +x side), so a negative x puts a foot forward.
+      # Both 0 = feet under the shoulders, the calibration-verified pose (was front -50 / rear +50,
+      # which drove the front thighs ~22 deg off the rear ones and slanted the body).
+      stance_x_front: 35.0    # +50 = feet 5cm back (was 0.0, before that -50.0)
+      stance_x_rear: 35.0     # +50 = feet 5cm back (was 0.0)
+      stance_y: 15.0          # all feet this far outward
+      settle_speed: 80.0      # mm/s max foot speed when returning to stand (slow leg descent on stop)
+      # Static per-leg foot trim, [x, y, z] mm, added to every command for that leg.
+      #   x: same sign as stance_x_* above (tune by eye: nudge 5mm, check the direction)
+      #   y: + = foot further outward from the body
+      #   z: + = extend leg = raise that corner, - = lower it
+      # Front legs carry the old front_z_trim (+10, they sat low under the camera).
+      # Zeroed 2026-10-06 after verifying calibration; re-add only if a residual error remains.
+      trim_fl: [0.0, 0.0, 0.0]     # was [0.0, 0.0, 10.0]
+      trim_fr: [0.0, 0.0, 0.0]     # was [-20.0, 0.0, 10.0]
+      trim_rl: [0.0, 0.0, 0.0]
+      trim_rr: [0.0, 0.0, 0.0]
+
+      # IMU body leveling (BNO055 fused orientation). Roll/pitch are integrated into
+      # per-leg height offsets. Check signs on arm: the node logs roll/pitch, expected
+      # +roll = right side down, +pitch = nose down. Flip a sign (or swap) if not.
+      level_enabled: false
+      imu_topic: "/spotmicro_imu/imu/data"
+      imu_timeout_s: 0.5
+      imu_roll_sign: 1.0
+      imu_pitch_sign: 1.0
+      imu_swap_roll_pitch: false
+      level_trim_roll: 11.0   # deg, IMU reading that should count as level (reads +11 when level)
+      level_trim_pitch: 0.0
+      level_gain: 2.0         # 1/s, integral gain on tilt error
+      level_max_deg: 10.0     # clamp on correction angle
+      level_deadband_deg: 0.5
+      level_half_length: 93.0 # mm, body centre -> front/rear hip
+      level_half_width: 80.0  # mm, body centre -> foot laterally

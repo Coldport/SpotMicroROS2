@@ -1,0 +1,135 @@
+"""
+MQTT message layout shared by the robot's deck_bridge node and the Steam Deck
+app. No ROS or MQTT imports here so it can be unit-tested — and
+steamdeck_app/src/protocol.rs (the Deck app is written in Rust) must be kept in
+sync with this file.
+
+Everything goes through one MQTT broker (Mosquitto, running on the robot).
+All topics live under a prefix, "spotmicro" by default.
+
+Robot -> Deck
+  <p>/robot/online   "1"/"0", retained. The bridge sets the "0" as its MQTT
+                     last-will, so the Deck sees the robot drop off.
+  <p>/video/color    JPEG bytes. Only published while a Deck is online and
+  <p>/video/depth    has that view selected (encoding costs the Pi CPU).
+  <p>/map            retained; u16 width, u16 height, f32 resolution (m/cell),
+                     f32 origin_x, f32 origin_y, then zlib(int8 occupancy,
+                     width*height, row 0 = lowest y; -1 unknown, 0..100 occupied).
+  <p>/scan           f32 angle_min, f32 angle_increment, f32 range_max, u16 count,
+                     then count * u16 range in millimetres (0xFFFF = no return).
+                     Angles are in the robot base frame (the bridge applies the laser's
+                     yaw from TF), counter-clockwise from +x = front.
+  <p>/state          JSON object, ~5 Hz (see DeckBridge._build_state).
+
+Deck -> Robot
+  <p>/deck/online    "1"/"0", retained; the Deck's last-will is "0".
+  <p>/deck/view      plain text: color | depth | lidar | map. Republished every
+                     second as a heartbeat; the robot stops encoding video if
+                     it goes quiet.
+  <p>/deck/input     JSON, ~30 Hz:
+                       {"seq": 12, "axes": [lx, ly, rx, ry, l2, r2],
+                        "buttons": ["a", "l1"]}          (names of pressed buttons)
+
+All binary fields are little endian.
+"""
+
+import json
+import struct
+
+DEFAULT_PREFIX = 'spotmicro'
+
+# Main-display views, in the order the Deck's L2 button cycles through them.
+# Only the first two are camera streams; the robot sends video for those alone.
+VIEW_NAMES = ['color', 'depth', 'lidar', 'map']
+VIDEO_VIEWS = ('color', 'depth')
+
+# Names follow SDL's game-controller naming, which is what the Steam Deck
+# presents in game mode. paddle1..4 are the Deck's back buttons: SDL's P1/P2 are
+# the right/left upper paddles (R4/L4) and P3/P4 the right/left lower (R5/L5).
+BUTTON_NAMES = [
+    'a', 'b', 'x', 'y',
+    'l1', 'r1',
+    'back', 'start', 'guide',
+    'l3', 'r3',
+    'dpad_up', 'dpad_down', 'dpad_left', 'dpad_right',
+    'paddle1', 'paddle2', 'paddle3', 'paddle4',
+    'l2', 'r2',            # digital "pressed" copies of the trigger axes
+]
+
+# Order of "axes" in the input message and in the published Joy message.
+# Sticks follow the ROS joy convention (left and up are positive, -1..1).
+# Triggers are 0 (released) .. 1 (fully pressed) — NOT the inverted -1..1 range
+# of ROS's xbox joy driver.
+AXIS_NAMES = ['left_x', 'left_y', 'right_x', 'right_y', 'l2', 'r2']
+
+_MAP_HEADER = struct.Struct('<HHfff')
+_SCAN_HEADER = struct.Struct('<fffH')
+
+
+class ProtocolError(Exception):
+    pass
+
+
+def topics(prefix=DEFAULT_PREFIX):
+    p = prefix.strip('/')
+    return {
+        'robot_online': f'{p}/robot/online',
+        'video_color': f'{p}/video/color',
+        'video_depth': f'{p}/video/depth',
+        'map': f'{p}/map',
+        'scan': f'{p}/scan',
+        'state': f'{p}/state',
+        'deck_online': f'{p}/deck/online',
+        'deck_view': f'{p}/deck/view',
+        'deck_input': f'{p}/deck/input',
+    }
+
+
+def pack_map(width, height, resolution, origin_x, origin_y, zlib_data):
+    return _MAP_HEADER.pack(width, height, resolution, origin_x, origin_y) + zlib_data
+
+
+def unpack_map_header(payload):
+    """-> (width, height, resolution, origin_x, origin_y, zlib_data)"""
+    if len(payload) < _MAP_HEADER.size:
+        raise ProtocolError('map payload too short')
+    return _MAP_HEADER.unpack_from(payload) + (payload[_MAP_HEADER.size:],)
+
+
+def pack_scan(angle_min, angle_increment, range_max, ranges_mm_le):
+    """ranges_mm_le: bytes of little-endian u16 millimetre ranges."""
+    return _SCAN_HEADER.pack(angle_min, angle_increment, range_max,
+                             len(ranges_mm_le) // 2) + ranges_mm_le
+
+
+def unpack_scan(payload):
+    """-> (angle_min, angle_increment, range_max, [range_mm, ...])"""
+    if len(payload) < _SCAN_HEADER.size:
+        raise ProtocolError('scan payload too short')
+    angle_min, inc, range_max, count = _SCAN_HEADER.unpack_from(payload)
+    body = payload[_SCAN_HEADER.size:]
+    if len(body) != 2 * count:
+        raise ProtocolError(f'scan length mismatch: {len(body)} bytes for {count} ranges')
+    return angle_min, inc, range_max, list(struct.unpack(f'<{count}H', body))
+
+
+def encode_input(sequence, axes, pressed_buttons):
+    return json.dumps({'seq': sequence, 'axes': [round(a, 4) for a in axes],
+                       'buttons': list(pressed_buttons)}, separators=(',', ':'))
+
+
+def decode_input(payload):
+    """-> (sequence, [6 axes], [6+ button flags in BUTTON_NAMES order])"""
+    try:
+        msg = json.loads(payload)
+        axes = [float(a) for a in msg['axes']]
+        pressed = set(msg['buttons'])
+        seq = int(msg['seq'])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ProtocolError(f'bad input message: {exc}') from exc
+    if len(axes) != len(AXIS_NAMES):
+        raise ProtocolError(f'expected {len(AXIS_NAMES)} axes, got {len(axes)}')
+    unknown = pressed - set(BUTTON_NAMES)
+    if unknown:
+        raise ProtocolError(f'unknown buttons: {sorted(unknown)}')
+    return seq, axes, [1 if name in pressed else 0 for name in BUTTON_NAMES]

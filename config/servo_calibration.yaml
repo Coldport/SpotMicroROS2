@@ -1,0 +1,89 @@
+# Servo calibration for SpotMicro's 12 leg servos, driven off a PCA9685 (16 ch).
+#
+# This is the YAML counterpart of servo_calibration.txt (which Servo_calib.py,
+# the manual jogging/calibration GUI, still reads and writes as JSON — the two
+# files are NOT auto-synced, so if you re-calibrate with that tool, copy the
+# new numbers over here by hand). This file is what spot_micro_ik and the
+# spot_micro_move gait node read.
+#
+# channel: PCA9685 channel (0-15) the servo is wired to.
+# angle:   the neutral/home angle (deg) recorded during calibration. Informational
+#          here — spot_micro_ik computes commanded angles from IK, not from this.
+# range:   servo actuation range in degrees (180 or 270), matching how it was
+#          constructed in Servo_calib.py / the hardware driver.
+# offset:  degrees added to the commanded angle before it's sent to the servo,
+#          to correct for horn/linkage mounting error. Positive = commanded
+#          angle is nudged up before clamping to [0, range].
+#
+# Values below were copied from servo_calibration.txt on 2026-09-24; Back Right Hip
+# offset re-synced on 2026-10-06. Verified against IK: with these offsets, IK foot
+# target (0, 0, 120) = servo 90/60/60 (left) and 90/120/120 (right) = robot stands
+# straight at half height, feet under the shoulders.
+
+Front Right:
+  Hip:
+    channel: 12
+    angle: 90
+    range: 270
+    offset: -5
+  Thigh:
+    channel: 11
+    angle: 120
+    range: 270
+    offset: 7
+  Knee:
+    channel: 10
+    angle: 120
+    range: 270
+    offset: 6
+
+Front Left:
+  Hip:
+    channel: 15
+    angle: 90
+    range: 270
+    offset: 0
+  Thigh:
+    channel: 14
+    angle: 60
+    range: 180
+    offset: 3
+  Knee:
+    channel: 13
+    angle: 60
+    range: 270
+    offset: 5
+
+Back Right:
+  Hip:
+    channel: 3
+    angle: 90
+    range: 270
+    offset: 5.68
+  Thigh:
+    channel: 4
+    angle: 120
+    range: 270
+    offset: 7.5
+  Knee:
+    channel: 5
+    angle: 120
+    range: 270
+    offset: 5
+
+Back Left:
+  Hip:
+    channel: 0
+    angle: 90
+    range: 270
+    offset: 7.9
+  Thigh:
+    channel: 1
+    angle: 60
+    range: 270
+    offset: -5
+  Knee:
+    channel: 2
+    angle: 60
+    range: 270
+    offset: 5

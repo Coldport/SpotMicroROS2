@@ -1,0 +1,25 @@
+[package]
+name = "spotmicro-deck"
+version = "0.1.0"
+edition = "2021"
+description = "Steam Deck controller/monitor app for the SpotMicro robot (MQTT)"
+license = "MIT"
+
+[dependencies]
+# Dynamically linked against the system SDL2 — SteamOS ships it, and it is what
+# Steam Input / Gamescope expect a game to use.
+sdl2 = { version = "0.37", default-features = false, features = ["unsafe_textures"] }
+# Pure-Rust MQTT client; no TLS (the broker is on the robot's LAN).
+rumqttc = { version = "0.25", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flate2 = "1"
+jpeg-decoder = "0.3"
+font8x8 = { version = "0.3", default-features = false, features = ["std"] }
+png = "0.17"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

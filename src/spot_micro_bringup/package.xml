@@ -10,11 +10,13 @@
   <exec_depend>spot_micro_description</exec_depend>
   <exec_depend>spot_micro_camera</exec_depend>
   <exec_depend>spot_micro_imu</exec_depend>
+  <exec_depend>spot_micro_deck</exec_depend>
   <exec_depend>sllidar_ros2</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>xacro</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>spot_micro_move</exec_depend>
   <exec_depend>nav2_map_server</exec_depend>
 
   <export>

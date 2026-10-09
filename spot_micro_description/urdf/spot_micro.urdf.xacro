@@ -238,7 +238,7 @@
   <xacro:property name="imu_yaw"            value="0" />
 
   <xacro:property name="lidar_scan_height"  value="0.035" />  <!-- cover to scan plane (A2M12) MEASURE -->
-  <xacro:property name="lidar_yaw"          value="0" />      <!-- rotation of scan 0 deg vs +x MEASURE -->
+  <xacro:property name="lidar_yaw"          value="3.14159" /><!-- rotation of scan 0 deg vs +x; 180 deg: verified against the D405 depth (scan 0 points at the rear) -->
 
   <xacro:property name="camera_y"           value="0" />      <!-- centred                     MEASURE -->
   <xacro:property name="camera_z"           value="0" />      <!-- height on the front face    MEASURE -->
