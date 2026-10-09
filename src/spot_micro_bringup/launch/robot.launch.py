@@ -8,7 +8,9 @@ Starts:
   bno055_node            — BNO055 IMU (/spotmicro_imu/imu/data)
   realsense2_camera      — D405 color + depth (/spotmicro_cam/d405/...)
   static odom -> base_link — identity, stands in for real odometry
-  slam_toolbox           — 2D lidar SLAM, publishes /map and map -> odom
+  scan_gate              — /scan -> /scan_gated, drops scans taken while a foot is up
+                           (passes everything when gait_node isn't running)
+  slam_toolbox           — 2D lidar SLAM on /scan_gated, publishes /map and map -> odom
   deck_bridge            — MQTT bridge to the Steam Deck app (streams + /spotmicro_deck/joy)
 
 It does not start gait_controller or anything that moves the robot. When the
@@ -109,6 +111,14 @@ def generate_launch_description():
 
         _include('spot_micro_deck', 'deck.launch.py',
                  condition=IfCondition(LaunchConfiguration('deck'))),
+
+        # Pure relay, no hardware: keeps SLAM fed even with no gait_node running.
+        Node(
+            package='spot_micro_move',
+            executable='scan_gate',
+            name='scan_gate',
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('slam'))),
 
         # slam_toolbox's own launch file defaults use_sim_time to TRUE, which on
         # real hardware makes it wait forever for a simulated /clock.

@@ -16,6 +16,7 @@
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>xacro</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>spot_micro_move</exec_depend>
   <exec_depend>nav2_map_server</exec_depend>
 
   <export>

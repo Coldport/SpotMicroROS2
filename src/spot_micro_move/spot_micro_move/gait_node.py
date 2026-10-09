@@ -66,6 +66,20 @@ Target = gain * (centroid of the other three feet), using `level_half_length`
 uses `ik_x_forward_sign` to map body-forward onto IK x. Crawl only (trot has
 two feet down on a diagonal, which a body shift can't help).
 
+TURNING: the turn stick rotates the body about its centre, so each foot's
+stride follows an arc of the circle through it (front and rear feet also
+move sideways, in opposite directions) instead of plain fore/aft pushes that
+skid the feet. `turn_gain` is the arc length (mm) each foot sweeps per half
+stride at full stick. Translation and turn are combined per foot, and the
+total horizontal offset from the neutral point is clamped to
+`max_foot_offset` mm so no stick combination (or param typo) can drive a
+foot out of reach.
+
+STABLE FLAG: `stable_topic` (std_msgs/Bool) is published every control tick:
+True while no foot is in the air (standing, disarmed, or the four-feet-down
+part of a crawl slot). scan_gate (this package, started by bringup) uses it to feed SLAM
+only lidar scans taken while the body isn't tipped by a lifted leg.
+
 SETTLE: when the sticks centre, feet don't snap to the stand pose — each foot
 moves toward it at no more than `settle_speed` mm/s, so a leg that was up
 mid-swing comes down gently.
@@ -86,6 +100,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu, Joy
+from std_msgs.msg import Bool
 
 from spot_micro_deck.chord import ChordDetector
 from spot_micro_deck.protocol import AXIS_NAMES, BUTTON_NAMES
@@ -139,7 +154,9 @@ class GaitNode(Node):
         self.declare_parameter('step_height', 30.0)     # mm foot lift during swing
         self.declare_parameter('step_length', 40.0)      # mm max fore/aft stride
         self.declare_parameter('step_lateral', 20.0)      # mm max lateral stride
-        self.declare_parameter('turn_gain', 25.0)         # mm of extra stride per side at full turn stick
+        self.declare_parameter('turn_gain', 25.0)         # mm of arc per foot per half stride at full turn stick
+        self.declare_parameter('max_foot_offset', 60.0)   # mm clamp on each foot's horizontal stride offset
+        self.declare_parameter('stable_topic', '/spotmicro_move/stable')
         self.declare_parameter('gait_freq', 1.0)          # full step cycles per second at any commanded speed
         self.declare_parameter('gait_type', 'crawl')      # 'crawl' (one leg at a time) or 'trot'
         self.declare_parameter('shift_frac', 0.35)        # fraction of each leg's slot with 4 feet down, shifting body
@@ -190,6 +207,7 @@ class GaitNode(Node):
         self._step_length = float(p('step_length').value)
         self._step_lateral = float(p('step_lateral').value)
         self._turn_gain = float(p('turn_gain').value)
+        self._max_foot_offset = max(float(p('max_foot_offset').value), 0.0)
         self._gait_freq = max(float(p('gait_freq').value), 1e-3)
         gait_type = str(p('gait_type').value)
         if gait_type not in GAITS:
@@ -264,6 +282,9 @@ class GaitNode(Node):
         self._level_roll = 0.0           # deg, accumulated correction
         self._level_pitch = 0.0
 
+        self._stable = True              # no foot in the air (see STABLE FLAG)
+        self._stable_pub = self.create_publisher(Bool, p('stable_topic').value, 10)
+
         self.create_subscription(Joy, p('joy_topic').value, self._on_joy, 10)
         if self._level_enabled:
             self.create_subscription(Imu, p('imu_topic').value, self._on_imu, qos_profile_sensor_data)
@@ -310,6 +331,11 @@ class GaitNode(Node):
     # ── control loop ─────────────────────────────────────────────────────────
 
     def _control_loop(self):
+        self._stable = True   # _gait_tick clears it while a foot is up
+        self._control_step()
+        self._stable_pub.publish(Bool(data=self._stable))
+
+    def _control_step(self):
         now = time.monotonic()
         dt = max(0.0, now - self._last_tick)
         self._last_tick = now
@@ -492,13 +518,38 @@ class GaitNode(Node):
         x = x * x * x * (x * (6.0 * x - 15.0) + 10.0)      # smootherstep
         return tuple(f + (t - f) * x for f, t in zip(frm, to))
 
+    def _turn_offset(self, leg, wz, s):
+        """IK-frame (x, y) foot offset at stride position s (-1..+1) for a
+        turn command wz: the neutral foot point rotated about the body centre
+        by s * (half-stride yaw), so the foot traces an arc rather than a
+        straight fore/aft line. Sign kept from the old tank-style turn: +wz
+        moves the left feet along +IK x in stance-start, right feet -IK x."""
+        if wz == 0.0:
+            return 0.0, 0.0
+        side = 1.0 if leg in LEFT_SIDE else -1.0
+        nx = self._neutral(leg)[0]
+        # Foot point in the body frame (forward, left), mm from the body centre.
+        fwd = (self._half_length if leg in FRONT else -self._half_length) + self._ik_x_sign * nx
+        left = side * (self._half_width + self._stance_y)
+        radius = math.hypot(fwd, left)
+        # Yaw that sweeps turn_gain mm of arc; chosen so the left feet's
+        # forward motion matches the previous convention.
+        yaw = -self._ik_x_sign * self._turn_gain * wz / radius * s
+        c, sn = math.cos(yaw), math.sin(yaw)
+        d_fwd = c * fwd - sn * left - fwd
+        d_left = sn * fwd + c * left - left
+        return self._ik_x_sign * d_fwd, side * d_left
+
     def _gait_tick(self, vx, vy, wz):
         period = 1.0 / self._gait_freq
         phase = (self._t % period) / period   # 0..1
 
-        stride_x = self._step_length * max(-1.0, min(1.0, vx))
-        stride_y = self._step_lateral * max(-1.0, min(1.0, vy))
-        turn = self._turn_gain * max(-1.0, min(1.0, wz))
+        # Diagonal stick + turn would otherwise stack up to ~1.7x a single axis.
+        mag = math.sqrt(vx * vx + vy * vy + wz * wz)
+        if mag > 1.0:
+            vx, vy, wz = vx / mag, vy / mag, wz / mag
+        stride_x = self._step_length * vx
+        stride_y = self._step_lateral * vy
         bx, by = self._body_shift(phase, period)
 
         swing_len = self._slot_frac - self._swing_start
@@ -507,11 +558,6 @@ class GaitNode(Node):
         feet = {}
         for leg in LEGS:
             side = 1.0 if leg in LEFT_SIDE else -1.0
-            leg_stride_x = stride_x + side * turn
-            # IK y is per-leg "outward", so a body-frame strafe is +y on the
-            # left legs and -y on the right legs.
-            leg_stride_y = side * stride_y
-
             local = (phase - self._gait_offsets[leg]) % 1.0
 
             if self._swing_start <= local < self._slot_frac:
@@ -519,14 +565,23 @@ class GaitNode(Node):
                 # Eased so the foot leaves and lands with zero velocity (soft
                 # lift-off and touchdown): cosine ease fore/aft, sin^2 lift.
                 ease = 0.5 - 0.5 * math.cos(math.pi * sw)
-                dx = leg_stride_x * (2.0 * ease - 1.0)
-                dy = leg_stride_y * (2.0 * ease - 1.0)
+                s = 2.0 * ease - 1.0                           # -1 -> +1
                 dz = -self._step_height * math.sin(math.pi * sw) ** 2   # lift (shorten the leg)
+                self._stable = False
             else:
                 st = ((local - self._slot_frac) % 1.0) / stance_len   # 0..1 across stance
-                dx = leg_stride_x * (1.0 - 2.0 * st)
-                dy = leg_stride_y * (1.0 - 2.0 * st)
+                s = 1.0 - 2.0 * st                             # +1 -> -1
                 dz = 0.0
+
+            tx, ty = self._turn_offset(leg, wz, s)
+            # IK y is per-leg "outward", so a body-frame strafe is +y on the
+            # left legs and -y on the right legs.
+            dx = stride_x * s + tx
+            dy = side * stride_y * s + ty
+            r = math.hypot(dx, dy)
+            if r > self._max_foot_offset:
+                dx *= self._max_foot_offset / r
+                dy *= self._max_foot_offset / r
 
             # Moving the body by (bx, by) moves every foot by (-bx, -by) relative
             # to it. Per-leg IK y is outward, so body-left (+by) is -y on left legs.

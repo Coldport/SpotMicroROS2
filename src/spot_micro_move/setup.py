@@ -24,6 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             'gait_node = spot_micro_move.gait_node:main',
+            'scan_gate = spot_micro_move.scan_gate:main',
         ],
     },
 )

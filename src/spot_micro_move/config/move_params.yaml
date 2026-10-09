@@ -28,8 +28,9 @@
       stand_z: 150.0         # mm, starting body height (standing AND stepping) — R1/L1 adjust live
       step_height: 60.0       # mm foot lift during swing (90 dwarfed the stride — looked like marching in place)
       step_length: 50.0       # mm max fore/aft stride at full stick (±50; FL thigh clamps at 0° past ~55)
-      step_lateral: 500.0      # mm max lateral stride at full stick deflection
-      turn_gain: 50.0         # mm of extra/less stride per side at full turn stick
+      step_lateral: 30.0      # mm max lateral stride at full stick (was 500 — threw the legs out of reach)
+      turn_gain: 50.0         # mm of arc each foot sweeps per half stride at full turn stick (feet now follow a circle)
+      max_foot_offset: 60.0   # mm hard clamp on each foot's horizontal stride offset (stride + turn combined)
       speed_scale: 1.0        # multiplies stick input -> stride (0.5 halved step_length to ±20mm: no net motion)
       gait_freq: 0.35          # step cycles per second (was 0.50; slowed so the longer shift_frac doesn't shorten the swing)
       gait_type: "crawl"      # "crawl" = one leg lifted at a time (RL, FL, RR, FR); "trot" = diagonal pairs
