@@ -3,6 +3,8 @@
 //!   * ticker   — publishes controller input (30 Hz) and the view heartbeat (1 Hz),
 //!                and swaps the video subscription when the view changes
 //!   * decoder  — JPEG-decodes only the newest video frame (older ones are dropped)
+//! start() also hands back a Commander, which the UI thread uses to send
+//! settings changes.
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -13,7 +15,7 @@ use rumqttc::{Client, Event, LastWill, MqttOptions, Packet, QoS};
 
 use crate::input::InputState;
 use crate::protocol::{self, Topics};
-use crate::shared::{Frame, RobotState, SharedRef, View};
+use crate::shared::{Frame, RobotState, SettingAck, SettingsMsg, SharedRef, View};
 
 pub struct NetConfig {
     pub host: String,
@@ -25,12 +27,27 @@ pub struct NetConfig {
 
 type FrameSlot = Arc<(Mutex<Option<(View, Vec<u8>)>>, Condvar)>;
 
+/// Sends commands to the robot from the UI thread (never blocks).
+pub struct Commander {
+    client: Client,
+    topics: Arc<Topics>,
+}
+
+impl Commander {
+    /// Ask the robot to change one setting; the reply arrives as a SettingAck.
+    pub fn set(&self, key: &str, value: &serde_json::Value) -> bool {
+        self.client
+            .try_publish(&self.topics.deck_set, QoS::AtLeastOnce, false, protocol::encode_set(key, value))
+            .is_ok()
+    }
+}
+
 pub fn start(
     cfg: NetConfig,
     shared: SharedRef,
     view: Arc<AtomicU8>,
     input: Arc<Mutex<InputState>>,
-) {
+) -> Commander {
     let topics = Arc::new(Topics::new(&cfg.prefix));
 
     let mut opts = MqttOptions::new("spotmicro-deck", cfg.host.clone(), cfg.port);
@@ -44,6 +61,7 @@ pub fn start(
     }
     let (client, mut connection) = Client::new(opts, 256);
 
+    let commander = Commander { client: client.clone(), topics: topics.clone() };
     let slot: FrameSlot = Arc::new((Mutex::new(None), Condvar::new()));
     let subscribed_video: Arc<Mutex<Option<View>>> = Arc::new(Mutex::new(None));
 
@@ -128,6 +146,8 @@ pub fn start(
                     let _ = client.try_subscribe(&topics.scan, QoS::AtMostOnce);
                     let _ = client.try_subscribe(&topics.map, QoS::AtLeastOnce);
                     let _ = client.try_subscribe(&topics.robot_online, QoS::AtLeastOnce);
+                    let _ = client.try_subscribe(&topics.settings, QoS::AtMostOnce);
+                    let _ = client.try_subscribe(&topics.settings_ack, QoS::AtLeastOnce);
                 }
                 Ok(Event::Incoming(Packet::Publish(p))) => {
                     dispatch(&topics, &p.topic, &p.payload, &shared, &slot);
@@ -145,6 +165,7 @@ pub fn start(
             }
         }
     });
+    commander
 }
 
 fn video_topic(topics: &Topics, view: View) -> String {
@@ -183,6 +204,19 @@ fn dispatch(topics: &Topics, topic: &str, payload: &[u8], shared: &SharedRef, sl
             let mut s = shared.lock().unwrap();
             s.scan = Some(Arc::new(sc));
             s.scan_at = Some(Instant::now());
+        }
+    } else if topic == topics.settings {
+        match serde_json::from_slice::<SettingsMsg>(payload) {
+            Ok(m) => {
+                let mut s = shared.lock().unwrap();
+                s.settings = m.items;
+                s.settings_at = Some(Instant::now());
+            }
+            Err(e) => shared.lock().unwrap().last_error = format!("settings: {e}"),
+        }
+    } else if topic == topics.settings_ack {
+        if let Ok(ack) = serde_json::from_slice::<SettingAck>(payload) {
+            shared.lock().unwrap().acks.push(ack);
         }
     } else if topic == topics.robot_online {
         shared.lock().unwrap().robot_online = Some(payload == b"1");

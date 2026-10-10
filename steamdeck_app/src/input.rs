@@ -1,6 +1,8 @@
 //! Steam Deck controller state, kept in the layout the robot expects
 //! (see protocol.rs / protocol.py): 6 axes and 21 buttons.
 
+use std::time::{Duration, Instant};
+
 use sdl2::controller::{Axis, Button};
 use sdl2::event::Event;
 
@@ -14,9 +16,64 @@ pub struct InputState {
 }
 
 /// Things the UI should react to, beyond the raw input state.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Action {
     NextView,
+    /// Start / menu button: open or close the settings menu.
+    ToggleMenu,
+    Nav(Dir),
+    /// A: toggle / cycle the selected setting.
+    Confirm,
+    /// X: set up Wi-Fi over Bluetooth (only acted on while there's no link).
+    Bluetooth,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Dir {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// Auto-repeat for a held D-pad direction, like a keyboard: one step on press,
+/// then after DELAY a step every RATE until released.
+#[derive(Default)]
+pub struct Repeater {
+    held: Option<(Dir, Instant)>,
+}
+
+impl Repeater {
+    const DELAY: Duration = Duration::from_millis(380);
+    const RATE: Duration = Duration::from_millis(85);
+
+    pub fn press(&mut self, dir: Dir, now: Instant) {
+        self.held = Some((dir, now + Self::DELAY));
+    }
+    pub fn release(&mut self, dir: Dir) {
+        if matches!(self.held, Some((d, _)) if d == dir) {
+            self.held = None;
+        }
+    }
+    /// Repeats due by `now`.
+    pub fn poll(&mut self, now: Instant) -> Option<Dir> {
+        let (dir, next) = self.held?;
+        if now < next {
+            return None;
+        }
+        self.held = Some((dir, next.max(now - Self::RATE) + Self::RATE));
+        Some(dir)
+    }
+}
+
+fn dpad_dir(b: Button) -> Option<Dir> {
+    Some(match b {
+        Button::DPadUp => Dir::Up,
+        Button::DPadDown => Dir::Down,
+        Button::DPadLeft => Dir::Left,
+        Button::DPadRight => Dir::Right,
+        _ => return None,
+    })
 }
 
 // A real Steam Deck stick rests at about 0.08 when untouched, so the deadzone has to clear that.
@@ -28,6 +85,7 @@ const TRIGGER_RELEASE: f32 = 0.3;
 #[derive(Default)]
 pub struct Gamepad {
     pub state: InputState,
+    pub repeat: Repeater,
 }
 
 fn stick(raw: i16) -> f32 {
@@ -73,11 +131,22 @@ impl Gamepad {
                 if let Some(i) = button_index(button) {
                     self.state.buttons[i] = true;
                 }
-                None
+                match button {
+                    Button::Start => Some(Action::ToggleMenu),
+                    Button::A => Some(Action::Confirm),
+                    Button::X => Some(Action::Bluetooth),
+                    b => dpad_dir(b).map(|d| {
+                        self.repeat.press(d, Instant::now());
+                        Action::Nav(d)
+                    }),
+                }
             }
             Event::ControllerButtonUp { button, .. } => {
                 if let Some(i) = button_index(button) {
                     self.state.buttons[i] = false;
+                }
+                if let Some(d) = dpad_dir(button) {
+                    self.repeat.release(d);
                 }
                 None
             }
@@ -164,6 +233,31 @@ mod tests {
         assert!(pad.state.buttons[0] && pad.state.buttons[11]);
         pad.handle(&Event::ControllerButtonUp { timestamp: 0, which: 0, button: Button::A });
         assert!(!pad.state.buttons[0]);
+    }
+
+    #[test]
+    fn start_dpad_and_a_produce_menu_actions() {
+        let mut pad = Gamepad::default();
+        let down = |b| Event::ControllerButtonDown { timestamp: 0, which: 0, button: b };
+        assert_eq!(pad.handle(&down(Button::Start)), Some(Action::ToggleMenu));
+        assert_eq!(pad.handle(&down(Button::DPadDown)), Some(Action::Nav(Dir::Down)));
+        assert_eq!(pad.handle(&down(Button::A)), Some(Action::Confirm));
+        assert!(pad.state.buttons[7] && pad.state.buttons[12], "still forwarded to the robot");
+    }
+
+    #[test]
+    fn held_dpad_repeats_after_a_delay() {
+        let t0 = Instant::now();
+        let mut r = Repeater::default();
+        r.press(Dir::Right, t0);
+        assert_eq!(r.poll(t0 + Duration::from_millis(100)), None);
+        assert_eq!(r.poll(t0 + Duration::from_millis(400)), Some(Dir::Right));
+        assert_eq!(r.poll(t0 + Duration::from_millis(420)), None);
+        assert_eq!(r.poll(t0 + Duration::from_millis(480)), Some(Dir::Right));
+        r.release(Dir::Left); // a different direction doesn't stop it
+        assert_eq!(r.poll(t0 + Duration::from_millis(600)), Some(Dir::Right));
+        r.release(Dir::Right);
+        assert_eq!(r.poll(t0 + Duration::from_millis(900)), None);
     }
 
     #[test]
