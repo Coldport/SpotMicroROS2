@@ -25,7 +25,7 @@ Front Right:
     channel: 12
     angle: 90
     range: 270
-    offset: -5
+    offset: -3
   Thigh:
     channel: 11
     angle: 120
@@ -42,29 +42,29 @@ Front Left:
     channel: 15
     angle: 90
     range: 270
-    offset: 0
+    offset: -1
   Thigh:
     channel: 14
     angle: 60
-    range: 180
-    offset: 3
+    range: 270
+    offset: 30
   Knee:
     channel: 13
     angle: 60
     range: 270
-    offset: 5
+    offset: 10
 
 Back Right:
   Hip:
     channel: 3
     angle: 90
     range: 270
-    offset: 5.68
+    offset: 11.68
   Thigh:
     channel: 4
     angle: 120
     range: 270
-    offset: 7.5
+    offset: 2.5
   Knee:
     channel: 5
     angle: 120

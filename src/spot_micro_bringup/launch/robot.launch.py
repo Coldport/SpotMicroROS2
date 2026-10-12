@@ -6,7 +6,9 @@ Starts:
   robot_state_publisher  — URDF: base_link -> laser / imu_link / d405_link
   sllidar_node           — RPLIDAR A2M12 (/scan)
   bno055_node            — BNO055 IMU (/spotmicro_imu/imu/data)
-  realsense2_camera      — D405 color + depth (/spotmicro_cam/d405/...)
+  camera                 — whichever is plugged in (spot_micro_camera auto-detects):
+                           RealSense D405 color + depth (/spotmicro_cam/d405/...) or a
+                           USB webcam, color only (/spotmicro_cam/usb/...)
   static odom -> base_link — identity, stands in for real odometry
   scan_gate              — /scan -> /scan_gated, drops scans taken while a foot is up
                            (passes everything when gait_node isn't running)
@@ -71,7 +73,11 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'imu', default_value='true', description='Start the BNO055 IMU driver'),
         DeclareLaunchArgument(
-            'camera', default_value='true', description='Start the RealSense D405 driver'),
+            'camera', default_value='true', description='Start the camera driver'),
+        DeclareLaunchArgument(
+            'camera_type', default_value='auto',
+            description='auto (detect: RealSense D405 if plugged in, else a USB webcam), '
+                        'realsense or usb'),
         DeclareLaunchArgument(
             'slam', default_value='true', description='Start slam_toolbox'),
         DeclareLaunchArgument(
@@ -107,7 +113,8 @@ def generate_launch_description():
                  condition=IfCondition(LaunchConfiguration('imu'))),
 
         _include('spot_micro_camera', 'camera.launch.py',
-                 condition=IfCondition(LaunchConfiguration('camera'))),
+                 condition=IfCondition(LaunchConfiguration('camera')),
+                 launch_arguments={'camera_type': LaunchConfiguration('camera_type')}),
 
         _include('spot_micro_deck', 'deck.launch.py',
                  condition=IfCondition(LaunchConfiguration('deck'))),

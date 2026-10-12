@@ -1,14 +1,19 @@
 //! SpotMicro Steam Deck app: live camera / depth / lidar / map from the robot,
-//! plus the Deck's controller input sent back to it — all over MQTT.
+//! the Deck's controller input sent back to it, and a settings menu (Start/☰)
+//! for the robot's live-tunable gait and video settings — all over MQTT. The
+//! View (⧉) button shows every control and trick trigger.
 //!
 //! Usage: spotmicro-deck [--host HOST[:PORT]] [--port N] [--user U --password P]
-//!                       [--prefix TOPIC_PREFIX] [--windowed]
+//!                       [--prefix TOPIC_PREFIX] [--windowed] [--menu] [--controls]
 //! The host can also come from $SPOTDECK_HOST or ~/.config/spotmicro-deck/host.
 
+mod bt;
 mod input;
+mod menu;
 mod net;
 mod protocol;
 mod shared;
+mod text;
 mod ui;
 
 use std::fs::File;
@@ -24,7 +29,8 @@ use sdl2::pixels::PixelFormatEnum;
 use sdl2::render::Canvas;
 use sdl2::video::Window;
 
-use input::{Action, Gamepad, InputState};
+use input::{Action, Dir, Gamepad, InputState};
+use menu::Menu;
 use shared::{Shared, View};
 use ui::{Snapshot, Ui, LOGICAL_H, LOGICAL_W};
 
@@ -37,6 +43,12 @@ struct Args {
     password: Option<String>,
     windowed: bool,
     software: bool,
+    /// Start with the settings menu open (handy with --screenshot).
+    menu: bool,
+    /// Start with the controls reference open.
+    controls: bool,
+    /// Start on this view (color | depth | lidar | map).
+    view: Option<View>,
     /// Save a screenshot of the current view after N seconds, then quit.
     screenshot: Option<(String, f32)>,
     /// Scripted L2 presses with a screenshot of each view saved into this directory.
@@ -56,6 +68,12 @@ fn parse_args() -> Result<Args, String> {
             "--user" => a.user = Some(value("--user")?),
             "--password" => a.password = Some(value("--password")?),
             "--windowed" => a.windowed = true,
+            "--menu" => a.menu = true,
+            "--controls" => a.controls = true,
+            "--view" => {
+                let name = value("--view")?;
+                a.view = Some(View::ALL.into_iter().find(|v| v.wire_name() == name).ok_or("bad --view")?);
+            }
             "--software" => a.software = true,
             "--screenshot" => {
                 let path = value("--screenshot")?;
@@ -72,7 +90,9 @@ fn parse_args() -> Result<Args, String> {
             "-h" | "--help" => {
                 println!(
                     "spotmicro-deck [--host HOST[:PORT]] [--port N] [--user U --password P] \
-                     [--prefix P] [--windowed]\n\
+                     [--prefix P] [--windowed] [--menu] [--controls]\n\
+                     Start/☰ opens the robot settings menu (D-pad to select and adjust).\n\
+                     View/⧉ shows all controls and trick triggers.\n\
                      Host also from $SPOTDECK_HOST or ~/.config/spotmicro-deck/host (default spotmicro.local)."
                 );
                 std::process::exit(0);
@@ -113,6 +133,34 @@ fn save_screenshot(canvas: &Canvas<Window>, path: &str) -> Result<(), String> {
     enc.write_header()
         .and_then(|mut wr| wr.write_image_data(&pixels))
         .map_err(|e| format!("{path}: {e}"))
+}
+
+/// Remember `host` (~/.config/spotmicro-deck/host) and re-exec this app with
+/// `--host host`, so every thread reconnects to it from scratch.
+fn restart_with_host(host: &str) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    if let Some(dir) = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.config")))
+    {
+        let dir = format!("{dir}/spotmicro-deck");
+        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(format!("{dir}/host"), format!("{host}\n"))) {
+            eprintln!("couldn't save the robot address in {dir}/host: {e}");
+        }
+    }
+    let mut args: Vec<String> = Vec::new();
+    let mut it = std::env::args().skip(1);
+    while let Some(a) = it.next() {
+        if a == "--host" {
+            it.next();
+        } else {
+            args.push(a);
+        }
+    }
+    args.extend(["--host".to_string(), host.to_string()]);
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    println!("restarting on {host}");
+    Err(format!("restart failed: {}", std::process::Command::new(exe).args(args).exec()))
 }
 
 fn axis_event(axis: Axis, value: i16) -> Event {
@@ -165,7 +213,7 @@ fn run() -> Result<(), String> {
     let shared = Arc::new(Mutex::new(Shared::default()));
     let view_atomic = Arc::new(AtomicU8::new(View::Color.to_u8()));
     let input_shared = Arc::new(Mutex::new(InputState::default()));
-    net::start(
+    let commander = net::start(
         net::NetConfig {
             host: host.clone(),
             port,
@@ -178,6 +226,7 @@ fn run() -> Result<(), String> {
         input_shared.clone(),
     );
 
+    let provision: bt::ProvisionRef = Arc::new(Mutex::new(bt::Provision::default()));
     let mut pad = Gamepad::default();
     let mut controllers: Vec<GameController> = Vec::new();
     for i in 0..game_controller.num_joysticks().unwrap_or(0) {
@@ -189,7 +238,21 @@ fn run() -> Result<(), String> {
         }
     }
 
-    let mut view = View::Color;
+    let mut view = args.view.unwrap_or(View::Color);
+    let mut menu = Menu::default();
+    menu.open = args.menu;
+    menu.controls_open = args.controls && !args.menu;
+    let mut last_note_seq: Option<u64> = None;
+    let mut depth_ok = true;
+    // L2 / Tab: next view, skipping Depth when the robot's camera has none.
+    let next_view = |v: View, depth_ok: bool| {
+        let n = v.next();
+        if n == View::Depth && !depth_ok {
+            n.next()
+        } else {
+            n
+        }
+    };
     let started = Instant::now();
     let mut selftest_step = 0usize;
     let mut pending_release: Option<f32> = None;
@@ -231,12 +294,23 @@ fn run() -> Result<(), String> {
         }
 
         let events: Vec<Event> = pump.poll_iter().chain(injected).collect();
+        let mut actions: Vec<Action> = Vec::new();
         for ev in events {
             match ev {
                 Event::Quit { .. } | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => break 'main,
-                Event::KeyDown { keycode: Some(Keycode::Tab | Keycode::Space), repeat: false, .. } => {
-                    view = view.next();
-                }
+                // Keyboard equivalents, for testing on a PC.
+                Event::KeyDown { keycode: Some(k), .. } => match k {
+                    Keycode::Tab | Keycode::Space => actions.push(Action::NextView),
+                    Keycode::M | Keycode::F1 => actions.push(Action::ToggleMenu),
+                    Keycode::H | Keycode::F2 => actions.push(Action::ToggleControls),
+                    Keycode::Up => actions.push(Action::Nav(Dir::Up)),
+                    Keycode::Down => actions.push(Action::Nav(Dir::Down)),
+                    Keycode::Left => actions.push(Action::Nav(Dir::Left)),
+                    Keycode::Right => actions.push(Action::Nav(Dir::Right)),
+                    Keycode::Return => actions.push(Action::Confirm),
+                    Keycode::B => actions.push(Action::Bluetooth),
+                    _ => {}
+                },
                 Event::ControllerDeviceAdded { which, .. } => {
                     if let Ok(c) = game_controller.open(which) {
                         println!("controller connected: {}", c.name());
@@ -250,17 +324,83 @@ fn run() -> Result<(), String> {
                     }
                 }
                 other => {
-                    if pad.handle(&other) == Some(Action::NextView) {
-                        view = view.next();
-                        if selftest_dir.is_some() {
-                            println!("selftest: L2 -> view {}", view.wire_name());
-                        }
+                    if let Some(a) = pad.handle(&other) {
+                        actions.push(a);
                     }
                 }
             }
         }
+        if let Some(d) = pad.repeat.poll(Instant::now()) {
+            actions.push(Action::Nav(d));
+        }
+
+        let (settings, calibrating) = {
+            let s = shared.lock().unwrap();
+            let calibrating = s.state_at.map(|t| t.elapsed().as_secs_f32() < 2.0).unwrap_or(false)
+                && s.state.as_ref().and_then(|st| st.mode.as_ref()).map(|m| m.mode == "calibrate").unwrap_or(false);
+            (s.settings.clone(), calibrating)
+        };
+        for action in actions {
+            let change = match action {
+                // L2 picks the joint in calibration mode, so it doesn't switch views then.
+                Action::NextView if calibrating => None,
+                Action::NextView => {
+                    view = next_view(view, depth_ok);
+                    if selftest_dir.is_some() {
+                        println!("selftest: L2 -> view {}", view.wire_name());
+                    }
+                    None
+                }
+                Action::ToggleMenu => {
+                    menu.toggle();
+                    None
+                }
+                Action::ToggleControls => {
+                    menu.toggle_controls();
+                    None
+                }
+                Action::Nav(d) if menu.open => menu.navigate(d, &settings),
+                Action::Confirm if menu.open => menu.confirm(&settings),
+                // Only offered while there's no link: on the same network, nothing to set up.
+                Action::Bluetooth if !shared.lock().unwrap().broker_connected => {
+                    bt::start(&provision);
+                    None
+                }
+                _ => None,
+            };
+            if let Some((key, value)) = change {
+                if !commander.set(&key, &value) {
+                    menu.notify("Not connected — change not sent".into(), false);
+                }
+            }
+        }
+        // Results from gait_node (IMU zeroed, calibration done/failed) as toasts.
+        // The first note seen is old news, so it only sets the baseline.
+        let note = {
+            let s = shared.lock().unwrap();
+            s.state.as_ref().and_then(|st| st.mode.as_ref()).and_then(|m| m.note.clone())
+        };
+        if let Some(n) = note {
+            if last_note_seq.is_some_and(|seq| seq != n.seq) {
+                menu.notify(n.text.clone(), n.ok);
+            }
+            last_note_seq = Some(n.seq);
+        }
+        let acks = std::mem::take(&mut shared.lock().unwrap().acks);
+        for ack in &acks {
+            menu.on_ack(ack, &settings);
+        }
         view_atomic.store(view.to_u8(), Ordering::Relaxed);
-        *input_shared.lock().unwrap() = pad.state.clone();
+        // While the settings menu is open the D-pad and A drive the menu only, so
+        // they mustn't also reach the robot (in calibration mode the D-pad
+        // changes servo offsets there).
+        let mut sent = pad.state.clone();
+        if menu.open {
+            for b in [protocol::BTN_A, protocol::BTN_DPAD_UP, protocol::BTN_DPAD_DOWN, protocol::BTN_DPAD_LEFT, protocol::BTN_DPAD_RIGHT] {
+                sent.buttons[b] = false;
+            }
+        }
+        *input_shared.lock().unwrap() = sent;
 
         let snap = {
             let s = shared.lock().unwrap();
@@ -283,9 +423,21 @@ fn run() -> Result<(), String> {
                 decode_ms: s.decode_ms,
                 input: pad.state.clone(),
                 gamepad_connected: !controllers.is_empty(),
+                settings,
+                settings_age: age(s.settings_at),
+                provision: provision.lock().unwrap().clone(),
             }
         };
-        ui.render(&mut canvas, &tc, &snap);
+        // Bluetooth setup found the robot's address: save it and restart on it.
+        if let Some(ip) = snap.provision.host.clone().filter(|_| !snap.provision.running) {
+            if format!("{ip}:{port}") != host_label {
+                ui.render(&mut canvas, &tc, &snap, &menu);
+                canvas.present();
+                restart_with_host(&ip)?;
+            }
+        }
+        depth_ok = snap.depth_available();
+        ui.render(&mut canvas, &tc, &snap, &menu);
 
         if let Some((path, after)) = &args.screenshot {
             if elapsed >= *after {

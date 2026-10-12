@@ -27,8 +27,9 @@
 #   6. Installs and enables a systemd service that runs foxglove_bridge
 #      (ROS2 WebSocket server for viewing /scan etc. from a browser) on boot.
 #   7. Installs ros-jazzy-realsense2-camera (which pulls in librealsense2 and
-#      the rs-* tools) and the spot_micro_camera udev rule so the robot's
-#      Intel RealSense D405 can be opened without sudo.
+#      the rs-* tools), ros-jazzy-usb-cam (plain USB webcam fallback) and the
+#      spot_micro_camera udev rule so the robot's Intel RealSense D405 can be
+#      opened without sudo.
 #   8. Installs ros-jazzy-slam-toolbox, ros-jazzy-nav2-map-server (slam_toolbox's
 #      save_map service shells out to it) and ros-jazzy-xacro, which the
 #      spot_micro_bringup launch (URDF TF + sensors + SLAM) depends on.
@@ -164,15 +165,16 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Intel RealSense D405 depth camera — realsense2_camera driver + udev rule
+# 7. Cameras — realsense2_camera (D405 depth camera) and usb_cam (plain USB
+#    webcam fallback; camera.launch.py picks whichever is plugged in) + udev rule
 # ---------------------------------------------------------------------------
 CAMERA_RULE_SRC="$REPO_DIR/src/spot_micro_camera/udev/spotmicro_cam.rules"
 CAMERA_RULE_DST="/etc/udev/rules.d/spotmicro_cam.rules"
 if command -v ros2 >/dev/null 2>&1 || [ -d /opt/ros ]; then
-    log "Installing realsense2_camera driver"
-    sudo apt-get install -y ros-jazzy-realsense2-camera
+    log "Installing camera drivers (realsense2_camera, usb_cam)"
+    sudo apt-get install -y ros-jazzy-realsense2-camera ros-jazzy-usb-cam
 else
-    warn "ROS2 not found at /opt/ros — skipping realsense2_camera driver install"
+    warn "ROS2 not found at /opt/ros — skipping camera driver install"
 fi
 
 if [ -f "$CAMERA_RULE_SRC" ]; then
@@ -244,6 +246,32 @@ if [ -f "$DECK_UNIT_SRC" ]; then
     rm -f "$RENDERED_UNIT"
 else
     warn "systemd/spotmicro-deck.service not found — skipping"
+fi
+
+# ---------------------------------------------------------------------------
+# 11. Wi-Fi setup over Bluetooth (the Deck's "Set up Wi-Fi over Bluetooth")
+# ---------------------------------------------------------------------------
+# Needs BlueZ (bluetoothd + bluetoothctl); Ubuntu server images don't ship it.
+WIFI_UNIT_SRC="$REPO_DIR/systemd/spotmicro-wifi-provision.service"
+WIFI_UNIT_DST="/etc/systemd/system/spotmicro-wifi-provision.service"
+if [ -f "$WIFI_UNIT_SRC" ]; then
+    if ! command -v bluetoothctl >/dev/null 2>&1; then
+        log "Installing BlueZ (for Wi-Fi setup over Bluetooth)"
+        sudo apt-get install -y bluez
+    fi
+    log "Installing spotmicro-wifi-provision systemd service"
+    RENDERED_UNIT="$(mktemp)"
+    sed -e "s|__REPO_DIR__|$REPO_DIR|g" "$WIFI_UNIT_SRC" > "$RENDERED_UNIT"
+    if sudo cmp -s "$RENDERED_UNIT" "$WIFI_UNIT_DST" 2>/dev/null; then
+        echo "  already installed"
+    else
+        sudo cp "$RENDERED_UNIT" "$WIFI_UNIT_DST"
+        sudo systemctl daemon-reload
+        sudo systemctl enable --now bluetooth.service spotmicro-wifi-provision.service
+        echo "  installed and started: the robot is pairable over Bluetooth for 10 min"
+        echo "  after boot (and whenever its Wi-Fi is down)"
+    fi
+    rm -f "$RENDERED_UNIT"
 fi
 
 WS_SOURCE_LINE="[ -f \"$REPO_DIR/install/setup.bash\" ] && source \"$REPO_DIR/install/setup.bash\"  # SpotMicroROS2 workspace"

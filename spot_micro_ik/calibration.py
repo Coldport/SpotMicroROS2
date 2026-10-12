@@ -6,7 +6,10 @@ Servo_calib.py, the manual jogging GUI, still owns. The two files are NOT kept
 in sync automatically — see the comment at the top of the .yaml.
 """
 
-from dataclasses import dataclass
+import os
+import re
+import tempfile
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import yaml
@@ -66,3 +69,69 @@ def load_calibration(path="config/servo_calibration.yaml"):
             knee=_joint_cal(leg_raw["Knee"]),
         )
     return calibration
+
+
+JOINTS = ("hip", "thigh", "knee")
+_YAML_JOINT = {"hip": "Hip", "thigh": "Thigh", "knee": "Knee"}
+
+
+def with_offset(leg_cal, joint, offset):
+    """Copy of `leg_cal` with one joint's ("hip"/"thigh"/"knee") offset changed."""
+    return replace(leg_cal, **{joint: replace(getattr(leg_cal, joint), offset=float(offset))})
+
+
+def _format_offset(value):
+    value = round(float(value), 2)
+    return str(int(value)) if value == int(value) else repr(value)
+
+
+def update_offsets_text(text, calibration):
+    """Return the calibration YAML `text` with every joint's `offset:` set from
+    `calibration` (dict[leg_name] -> LegCal). Line-based, so comments and layout
+    survive; raises ValueError if a leg/joint/offset line can't be found."""
+    want = {}
+    for leg_name, yaml_key in LEG_TO_YAML_KEY.items():
+        for joint in JOINTS:
+            want[(yaml_key, _YAML_JOINT[joint])] = getattr(calibration[leg_name], joint).offset
+    leg = joint = None
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        m = re.match(r"^(\s*)([^:#]+):\s*(.*?)(\s+#.*)?$", line)
+        if not m:
+            continue
+        key = m.group(2).strip()
+        if indent == 0:
+            leg, joint = key, None
+        elif m.group(3) == "":
+            joint = key
+        elif key == "offset" and (leg, joint) in want:
+            lines[i] = f"{m.group(1)}offset: {_format_offset(want.pop((leg, joint)))}{m.group(4) or ''}"
+    if want:
+        missing = ", ".join(f"{l}/{j}" for l, j in want)
+        raise ValueError(f"offset line not found for {missing}")
+    return "\n".join(lines)
+
+
+def save_offsets(path, calibration):
+    """Write the joint offsets in `calibration` back into the YAML at `path`
+    (atomic replace; symlinks followed). Only `offset:` values change."""
+    path = os.path.realpath(path)
+    with open(path) as f:
+        text = f.read()
+    new_text = update_offsets_text(text, calibration)
+    if new_text == text:
+        return False
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix="." + os.path.basename(path))
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(new_text)
+        os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    return True

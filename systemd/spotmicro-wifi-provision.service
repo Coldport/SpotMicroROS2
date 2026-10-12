@@ -1,0 +1,17 @@
+[Unit]
+Description=SpotMicro Wi-Fi setup over Bluetooth (the Steam Deck sends its Wi-Fi network when it can't reach the robot)
+Requires=bluetooth.service
+After=bluetooth.service
+
+[Service]
+Type=simple
+# Root: it rewrites /etc/netplan/60-spotmicro-wifi.yaml and runs netplan/wpa_cli.
+# No ROS needed, so it runs the module straight from the source tree.
+User=root
+Environment=PYTHONPATH=__REPO_DIR__/src/spot_micro_deck
+ExecStart=/usr/bin/python3 -m spot_micro_deck.wifi_provision --name SpotMicro --channel 22
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

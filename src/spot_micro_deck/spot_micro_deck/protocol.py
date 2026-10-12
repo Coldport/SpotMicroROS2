@@ -19,7 +19,16 @@ Robot -> Deck
                      then count * u16 range in millimetres (0xFFFF = no return).
                      Angles are in the robot base frame (the bridge applies the laser's
                      yaw from TF), counter-clockwise from +x = front.
-  <p>/state          JSON object, ~5 Hz (see DeckBridge._build_state).
+  <p>/state          JSON object, ~5 Hz (see DeckBridge._build_state). Includes
+                     "camera" (which camera is plugged in / streaming) and
+                     "gait" (gait_node running / armed) and, while armed,
+                     "mode" (gait_node's sentry / calibrate state; see
+                     spot_micro_move/gait_node.py MODES).
+  <p>/settings       JSON, ~1 Hz while a Deck is online: the live-tunable
+                     settings with their current values (see settings.py).
+                     The Deck's settings menu is drawn from this alone.
+  <p>/settings/ack   JSON reply to each deck/set:
+                       {"key": "step_height", "ok": true, "value": 40.0, "text": ""}
 
 Deck -> Robot
   <p>/deck/online    "1"/"0", retained; the Deck's last-will is "0".
@@ -29,6 +38,7 @@ Deck -> Robot
   <p>/deck/input     JSON, ~30 Hz:
                        {"seq": 12, "axes": [lx, ly, rx, ry, l2, r2],
                         "buttons": ["a", "l1"]}          (names of pressed buttons)
+  <p>/deck/set       JSON, change one setting: {"key": "step_height", "value": 40.0}
 
 All binary fields are little endian.
 """
@@ -79,9 +89,12 @@ def topics(prefix=DEFAULT_PREFIX):
         'map': f'{p}/map',
         'scan': f'{p}/scan',
         'state': f'{p}/state',
+        'settings': f'{p}/settings',
+        'settings_ack': f'{p}/settings/ack',
         'deck_online': f'{p}/deck/online',
         'deck_view': f'{p}/deck/view',
         'deck_input': f'{p}/deck/input',
+        'deck_set': f'{p}/deck/set',
     }
 
 
@@ -116,6 +129,15 @@ def unpack_scan(payload):
 def encode_input(sequence, axes, pressed_buttons):
     return json.dumps({'seq': sequence, 'axes': [round(a, 4) for a in axes],
                        'buttons': list(pressed_buttons)}, separators=(',', ':'))
+
+
+def decode_set(payload):
+    """-> (key, value) from a deck/set message."""
+    try:
+        msg = json.loads(payload)
+        return str(msg['key']), msg['value']
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ProtocolError(f'bad set message: {exc}') from exc
 
 
 def decode_input(payload):

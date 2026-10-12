@@ -9,16 +9,23 @@
       mqtt_password: ""
       topic_prefix: "spotmicro"
 
+      # Color stream of each camera; the bridge follows whichever one is running
+      # (spot_micro_camera's camera.launch.py starts the one that is plugged in).
       color_topic: "/spotmicro_cam/d405/color/image_raw/compressed"
+      usb_color_topic: "/spotmicro_cam/usb/image_raw/compressed"
       depth_topic: "/spotmicro_cam/d405/depth/image_rect_raw"
       scan_topic: "/scan"
       map_topic: "/map"
       imu_topic: "/spotmicro_imu/imu/data"
       map_frame: "map"
       base_frame: "base_link"
+      # The Deck's settings menu reads/writes this node's live parameters, and
+      # shows its armed state.
+      gait_node: "/gait_node"
+      armed_topic: "/spotmicro_move/armed"
 
-      jpeg_quality: 70
-      video_max_fps: 20.0
+      jpeg_quality: 75
+      video_max_fps: 30.0
       scan_rate_hz: 10.0
       state_rate_hz: 5.0
       # Depth view colour range: near = warm, far = cool, no reading = black.

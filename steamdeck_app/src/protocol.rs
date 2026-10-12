@@ -11,6 +11,11 @@ pub const BUTTON_NAMES: [&str; 21] = [
     "a", "b", "x", "y", "l1", "r1", "back", "start", "guide", "l3", "r3", "dpad_up", "dpad_down",
     "dpad_left", "dpad_right", "paddle1", "paddle2", "paddle3", "paddle4", "l2", "r2",
 ];
+pub const BTN_A: usize = 0;
+pub const BTN_DPAD_UP: usize = 11;
+pub const BTN_DPAD_DOWN: usize = 12;
+pub const BTN_DPAD_LEFT: usize = 13;
+pub const BTN_DPAD_RIGHT: usize = 14;
 pub const BTN_L2: usize = 19;
 pub const BTN_R2: usize = 20;
 
@@ -21,9 +26,12 @@ pub struct Topics {
     pub map: String,
     pub scan: String,
     pub state: String,
+    pub settings: String,
+    pub settings_ack: String,
     pub deck_online: String,
     pub deck_view: String,
     pub deck_input: String,
+    pub deck_set: String,
 }
 
 impl Topics {
@@ -37,9 +45,12 @@ impl Topics {
             map: t("map"),
             scan: t("scan"),
             state: t("state"),
+            settings: t("settings"),
+            settings_ack: t("settings/ack"),
             deck_online: t("deck/online"),
             deck_view: t("deck/view"),
             deck_input: t("deck/input"),
+            deck_set: t("deck/set"),
         }
     }
 }
@@ -117,6 +128,11 @@ pub fn encode_input(seq: u32, axes: &[f32; 6], pressed: &[bool; 21]) -> String {
     serde_json::json!({ "seq": seq, "axes": rounded, "buttons": names }).to_string()
 }
 
+/// deck/set: change one robot setting.
+pub fn encode_set(key: &str, value: &serde_json::Value) -> String {
+    serde_json::json!({ "key": key, "value": value }).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +166,14 @@ mod tests {
         assert!(parse_map(&unhex(MAP_HEX)[..10]).is_err());
         let scan = unhex(SCAN_HEX);
         assert!(parse_scan(&scan[..scan.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn set_matches_python_decoder() {
+        assert_eq!(
+            encode_set("step_height", &serde_json::json!(45.0)),
+            r#"{"key":"step_height","value":45.0}"#
+        );
     }
 
     #[test]
