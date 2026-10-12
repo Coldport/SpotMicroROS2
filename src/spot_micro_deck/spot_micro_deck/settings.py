@@ -93,6 +93,9 @@ SETTINGS = [
             help='Re-encoding quality of the depth view (the color view is sent as the camera encodes it).'),
     _f('depth_min_m', 'Depth near', 'Video', 0.05, 1.0, 0.05, 'm', 'Warmest colour of the depth view.', 'bridge'),
     _f('depth_max_m', 'Depth far', 'Video', 0.3, 5.0, 0.1, 'm', 'Coolest colour of the depth view.', 'bridge'),
+    # ── Map ──
+    Setting('clear_map', 'Clear map', 'Map', 'action', 'bridge',
+            help='Wipes the SLAM map and starts a new one from where the robot stands. Press A twice.'),
     # ── Robot ──
     Setting('shutdown', 'Shut down robot', 'Robot', 'action', 'bridge',
             help='Powers the robot\'s computer off (disarm first). Press A twice. '

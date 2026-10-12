@@ -3,3 +3,8 @@
       frame_id: "imu_link"
       i2c_address: 40      # 0x28 — BNO055 default; use 41 (0x29) if the ADR pin is pulled high
       update_rate_hz: 20.0
+      # Body-frame mount correction (see spot_micro_imu/mount.py). Written by the IMU
+      # zero (Deck: hold Y + D-pad down) and axis calibration (Y + D-pad left) — no need
+      # to edit by hand. [1, 0, 0, 0] = the chip's axes are the robot's.
+      mount_quaternion: [0.045704, -0.000819, -0.05952, -0.99718]
+      yaw_offset_deg: -175.838

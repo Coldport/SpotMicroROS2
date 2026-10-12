@@ -1,0 +1,22 @@
+/**:
+    ros__parameters:
+      # Plain USB (UVC) webcam via usb_cam — used when no RealSense is plugged in
+      # (camera.launch.py picks the driver; video_device comes from detection).
+      framerate: 30.0
+      io_method: "mmap"
+      # yuyv2rgb reads the camera's native YUYV stream and does a plain
+      # colorspace conversion. The MJPEG pixel formats (mjpeg2rgb, raw_mjpeg)
+      # look lighter on paper, but both reliably segfaulted usb_cam_node_exe's
+      # libav MJPEG decoder on the Anker C200 + this OS. YUYV tops out at
+      # 640x480 on that camera, which is plenty for a live view.
+      pixel_format: "yuyv2rgb"
+      image_width: 640
+      image_height: 480
+      camera_name: "usb_cam"
+      # Not in the URDF's TF tree: nothing uses this image geometrically.
+      frame_id: "usb_cam"
+      # JPEG quality of .../usb/image_raw/compressed, which the Steam Deck app
+      # and Foxglove read (image_transport defaults to 95: far too heavy for Wi-Fi).
+      # The name comes from usb_cam's own topic name, before the launch file's
+      # remap to usb/image_raw.
+      .image_raw.compressed.jpeg_quality: 60

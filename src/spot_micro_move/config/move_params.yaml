@@ -9,7 +9,7 @@
       joy_topic: "/spotmicro_deck/joy"
       height_up_button: "r1"     # hold to raise body (once armed)
       height_down_button: "l1"   # hold to lower body
-      height_rate: 40.0          # mm/s while held
+      height_rate: 80.0          # mm/s while held
       z_min: 100.0               # mm, body height clamp
       z_max: 220.0
       estop_button: "b"          # hold to force-disarm and release all servos
@@ -25,34 +25,35 @@
       servo_pwm_hz: 100          # was 50 (hardcoded)
       stick_deadzone: 0.50
 
-      stand_z: 150.0         # mm, starting body height (standing AND stepping) — R1/L1 adjust live
-      step_height: 60.0       # mm foot lift during swing (90 dwarfed the stride — looked like marching in place)
-      step_length: 50.0       # mm max fore/aft stride at full stick (±50; FL thigh clamps at 0° past ~55)
-      step_lateral: 30.0      # mm max lateral stride at full stick (was 500 — threw the legs out of reach)
+      stand_z: 100.0         # mm, starting body height (standing AND stepping) — R1/L1 adjust live
+      step_height: 80.0       # mm foot lift during swing (90 dwarfed the stride — looked like marching in place)
+      step_length: 70.0       # mm max fore/aft stride at full stick (±50; FL thigh clamps at 0° past ~55)
+      step_lateral: 40.0      # mm max lateral stride at full stick (was 500 — threw the legs out of reach)
       turn_gain: 50.0         # mm of arc each foot sweeps per half stride at full turn stick (feet now follow a circle)
-      max_foot_offset: 60.0   # mm hard clamp on each foot's horizontal stride offset (stride + turn combined)
-      speed_scale: 1.0        # multiplies stick input -> stride (0.5 halved step_length to ±20mm: no net motion)
-      gait_freq: 0.35          # step cycles per second (was 0.50; slowed so the longer shift_frac doesn't shorten the swing)
+      max_foot_offset: 70.0   # mm hard clamp on each foot's horizontal stride offset (stride + turn combined)
+      speed_scale: 0.6        # multiplies stick input -> stride (0.5 halved step_length to ±20mm: no net motion)
+      gait_freq: 0.55          # step cycles per second (was 0.50; slowed so the longer shift_frac doesn't shorten the swing)
       gait_type: "crawl"      # "crawl" = one leg lifted at a time (RL, FL, RR, FR); "trot" = diagonal pairs
+      odom_scale: 1.0         # odometry: real distance walked / estimated (walk 1 m, compare, adjust for slip)
 
       # Balance shift (crawl only): before each leg lifts, slide the body toward the
       # three feet that stay down so it doesn't tip over the support diagonal.
-      shift_frac: 0.50            # (was 0.35) of each leg's 1/4-cycle slot: 4 feet down while the body shifts; rest = swing
+      shift_frac: 0.3             # (was 0.35) of each leg's 1/4-cycle slot: 4 feet down while the body shifts; rest = swing
       shift_overlap: 0.4          # fraction of a swing the body slide spills into (foot barely up then); 0 = old stop-start
-      balance_enabled: true
-      balance_gain_lateral: 0.5   # (was 1.0) 1.0 = all the way to the support-triangle centroid (~32mm side to side)
-      balance_gain_fore_aft: 0.5  # front/back part of the shift (~31mm at 1.0); off until ik_x_forward_sign is confirmed
-      balance_max_shift: 40.0     # mm clamp per axis
+      balance_enabled: false
+      balance_gain_lateral: 0.15  # (was 1.0) 1.0 = all the way to the support-triangle centroid (~32mm side to side)
+      balance_gain_fore_aft: 0.35 # front/back part of the shift (~31mm at 1.0); off until ik_x_forward_sign is confirmed
+      balance_max_shift: 10.0     # mm clamp per axis
       ik_x_forward_sign: -1.0     # -1 = IK +x points backward (see stance comment below); flip if fore/aft shift goes the wrong way
 
       # Neutral foot placement (mm). IK frame per leg: +y = away from the body (x sign: see below).
       # IK +x appears to point BACKWARD (knees are on the +x side), so a negative x puts a foot forward.
       # Both 0 = feet under the shoulders, the calibration-verified pose (was front -50 / rear +50,
       # which drove the front thighs ~22 deg off the rear ones and slanted the body).
-      stance_x_front: 35.0    # +50 = feet 5cm back (was 0.0, before that -50.0)
-      stance_x_rear: 35.0     # +50 = feet 5cm back (was 0.0)
+      stance_x_front: 15.0    # +50 = feet 5cm back (was 0.0, before that -50.0)
+      stance_x_rear: 45.0     # +50 = feet 5cm back (was 0.0)
       stance_y: 15.0          # all feet this far outward
-      settle_speed: 80.0      # mm/s max foot speed when returning to stand (slow leg descent on stop)
+      settle_speed: 110.0     # mm/s max foot speed when returning to stand (slow leg descent on stop)
       # Static per-leg foot trim, [x, y, z] mm, added to every command for that leg.
       #   x: same sign as stance_x_* above (tune by eye: nudge 5mm, check the direction)
       #   y: + = foot further outward from the body
@@ -73,10 +74,50 @@
       imu_roll_sign: 1.0
       imu_pitch_sign: 1.0
       imu_swap_roll_pitch: false
-      level_trim_roll: 11.0   # deg, IMU reading that should count as level (reads +11 when level)
+      level_trim_roll: 0.0    # deg, IMU reading that should count as level — keep 0 and use the IMU zero (Y + D-pad down) instead
       level_trim_pitch: 0.0
-      level_gain: 2.0         # 1/s, integral gain on tilt error
-      level_max_deg: 10.0     # clamp on correction angle
+      level_gain: 5.0         # 1/s, integral gain on tilt error
+      level_max_deg: 8.0      # clamp on correction angle
       level_deadband_deg: 0.5
       level_half_length: 93.0 # mm, body centre -> front/rear hip
       level_half_width: 80.0  # mm, body centre -> foot laterally
+
+      # Modes (once armed). Double-tap sentry_button: SENTRY — feet stay planted, left stick
+      # rolls/pitches the body, right stick X yaws it. Hold calib_buttons for calib_hold_s:
+      # CALIBRATION — feet go to calib_pose (plain IK, no stance/trim/leveling); L1/R1 pick the
+      # leg, L2/R2 the joint, D-pad up/down +/- calib_step_deg, right/left +/- calib_fine_step_deg.
+      # Leaving calibration (or disarming) writes the offsets into calibration_path.
+      mode_topic: "/spotmicro_move/mode"
+      sentry_button: "y"
+      double_tap_s: 0.4
+      sentry_max_roll_deg: 24.0
+      sentry_max_pitch_deg: 29.0
+      sentry_max_yaw_deg: 26.0
+      sentry_rate_deg_s: 75.0     # how fast the body follows the sticks
+      sentry_foot_speed: 200.0    # mm/s cap on foot motion while posing
+      calib_buttons: ["y", "dpad_up"]
+      calib_hold_s: 3.0
+      calib_pose: [0.0, 0.0, 120.0]   # IK x, y, z of every foot (the pose the offsets were verified at)
+      calib_step_deg: 1.0
+      calib_fine_step_deg: 0.25
+      calib_max_offset_deg: 30.0
+
+      # Tricks (armed, walk mode): tap X once / twice / three times, or hold X + a D-pad
+      # direction (up, down, left, right). Names are from spot_micro_move/tricks.py:
+      # handshake, pee, butt_shake, dance, sit, bow, pushups. "" = nothing on that input.
+      # Press X during a trick to stop it.
+      trick_button: "x"
+      trick_taps: ["butt_shake", "dance", "pushups"]
+      trick_dpad: ["handshake", "sit", "bow", "pee"]
+      trick_foot_speed: 300.0     # mm/s safety cap on foot motion during a trick
+
+      # IMU (spot_micro_imu does the maths and saves to imu_params.yaml):
+      #   hold Y + D-pad down  -> zero: this attitude = level, this heading = yaw 0
+      #   hold Y + D-pad left  -> axis calibration, drone style: level, left side down, right
+      #                           side down, nose down, nose up (armed: the robot tilts itself
+      #                           on flat ground; disarmed: tilt it by hand as the Deck prompts)
+      imu_zero_buttons: ["y", "dpad_down"]
+      imu_calib_buttons: ["y", "dpad_left"]
+      imu_chord_hold_s: 1.0
+      imu_service_ns: "/spotmicro_imu"
+      imu_calib_roll_deg: 15.0       # armed calibration: tilt each way (roll and pitch)

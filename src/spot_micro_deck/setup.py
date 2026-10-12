@@ -25,6 +25,7 @@ setup(
         'console_scripts': [
             'deck_bridge = spot_micro_deck.deck_bridge:main',
             'stack_launcher = spot_micro_deck.stack_launcher:main',
+            'wifi_provision = spot_micro_deck.wifi_provision:main',
         ],
     },
 )

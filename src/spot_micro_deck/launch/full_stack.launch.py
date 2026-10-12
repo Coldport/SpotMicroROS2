@@ -35,7 +35,8 @@ def generate_launch_description():
                         'boot service), so a second one would fight it for the MQTT client id.'),
 
         _include('spot_micro_bringup', 'robot.launch.py',
-                 launch_arguments={'deck': LaunchConfiguration('deck')}),
+                 # gait_node broadcasts odom -> base_link itself.
+                 launch_arguments={'deck': LaunchConfiguration('deck'), 'static_odom': 'false'}),
 
         _include('spot_micro_move', 'move.launch.py'),
     ])

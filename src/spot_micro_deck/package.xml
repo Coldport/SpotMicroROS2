@@ -2,7 +2,7 @@
 <package format="3">
   <name>spot_micro_deck</name>
   <version>0.1.0</version>
-  <description>Bridge between the SpotMicro Steam Deck app and ROS2: streams camera, depth, lidar, map and robot state to the Deck and publishes its controller input</description>
+  <description>Bridge between the SpotMicro Steam Deck app and ROS2: streams camera, depth, lidar, map and robot state to the Deck, publishes its controller input and relays live settings changes</description>
   <maintainer email="layillatoo@gmail.com">SpotMicro</maintainer>
   <license>MIT</license>
 
@@ -11,8 +11,13 @@
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>tf2_ros_py</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
+  <!-- spot_micro_camera.detect: which camera is plugged in (optional at runtime). -->
+  <exec_depend>spot_micro_camera</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
   <!-- full_stack.launch.py (run by stack_launcher on L1+R1) includes spot_micro_bringup and
        spot_micro_move at runtime, but both of those already depend on this package (bringup
        includes deck.launch.py; spot_micro_move imports spot_micro_deck.protocol/chord), so

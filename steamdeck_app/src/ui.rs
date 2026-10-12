@@ -1082,7 +1082,7 @@ impl Ui {
     /// trigger. Mirrors gait_node / stack_launcher defaults (move_params.yaml).
     fn draw_controls_help(&mut self, canvas: &mut Canvas<Window>) {
         let r = Rect::new(M, TOP_H + M, LOGICAL_W - 2 * M as u32, LOGICAL_H - (TOP_H + 2 * M) as u32);
-        self.fill_round(canvas, r, RADIUS, Color::RGBA(15, 19, 27, 246));
+        self.fill_round(canvas, r, RADIUS, Color::RGBA(15, 19, 27, 250));
         canvas.set_draw_color(HAIRLINE);
         let _ = canvas.draw_line(Point::new(r.x() + RADIUS, r.y()), Point::new(r.right() - RADIUS, r.y()));
         self.text(canvas, "Controls", r.x() + 24, r.y() + 18, Weight::Bold, 28, TEXT);
@@ -1119,7 +1119,7 @@ impl Ui {
             &[
                 ("Modes", &[
                     ("Y ×2", "Sentry: sticks tilt the body", "L tilt, R twist; Y ×2 again to leave"),
-                    ("Y + ↑", "Servo calibration", "hold 3 s; L1/R1 leg, L2/R2 joint, D-pad trims"),
+                    ("Y + ↑", "Servo calibration", "hold 3 s; L1/R1 leg, L2/R2 joint"),
                     ("Y + ↓", "Zero the IMU", "hold 1 s, standing on flat ground"),
                     ("Y + ←", "Calibrate IMU axes", "hold 1 s; follow the prompts"),
                 ]),

@@ -59,3 +59,63 @@ def test_held_for_reports_progress():
     assert c.held_for(12.0) == 2.0
     c.update(pad(), 12.5)
     assert c.held_for(13.0) == 0.0
+
+
+Y = 3
+
+
+def test_double_tap_fires_on_the_second_press_only():
+    from spot_micro_deck.chord import DoubleTap
+    d = DoubleTap(Y, 0.4)
+    assert not d.update(pad(Y), 0.0)
+    assert not d.update(pad(Y), 0.1)      # still held: not a new press
+    assert not d.update(pad(), 0.15)
+    assert d.update(pad(Y), 0.3)
+    assert not d.update(pad(), 0.35)
+    assert not d.update(pad(Y), 0.5), 'third tap starts a new pair'
+
+
+def test_double_tap_too_slow_does_not_fire():
+    from spot_micro_deck.chord import DoubleTap
+    d = DoubleTap(Y, 0.4)
+    d.update(pad(Y), 0.0)
+    d.update(pad(), 0.1)
+    assert not d.update(pad(Y), 0.6)
+    d.update(pad(), 0.7)
+    assert d.update(pad(Y), 0.9), 'the slow tap counts as the first of a new pair'
+
+
+def test_repeat_steps_on_press_then_after_delay():
+    from spot_micro_deck.chord import Repeat
+    r = Repeat(0.4, 0.1)
+    assert r.update(True, 0.0)
+    assert not r.update(True, 0.2)
+    assert r.update(True, 0.4)
+    assert not r.update(True, 0.45)
+    assert r.update(True, 0.5)
+    assert not r.update(False, 0.6)
+    assert r.update(True, 0.7)
+
+
+def test_tap_counter_counts_quick_taps_after_the_window():
+    from spot_micro_deck.chord import TapCounter
+    X = 2
+    t = TapCounter(X, 0.4)
+    assert t.update(pad(X), 0.0) == 0
+    assert t.update(pad(), 0.1) == 0
+    assert t.update(pad(X), 0.2) == 0
+    assert t.update(pad(), 0.3) == 0
+    assert t.update(pad(), 0.55) == 0      # still inside the window of the 2nd press
+    assert t.update(pad(), 0.65) == 2
+    assert t.update(pad(), 2.0) == 0       # reported once
+
+
+def test_tap_counter_waits_for_release_and_cancel_drops_the_count():
+    from spot_micro_deck.chord import TapCounter
+    X = 2
+    t = TapCounter(X, 0.4)
+    t.update(pad(X), 0.0)
+    assert t.update(pad(X), 1.0) == 0      # held: not a tap yet
+    t.cancel()                             # used in a combo
+    assert t.update(pad(), 1.1) == 0
+    assert t.update(pad(), 3.0) == 0

@@ -50,6 +50,7 @@ from rclpy.qos import (DurabilityPolicy, QoSProfile, ReliabilityPolicy,
 from rclpy.time import Time
 from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import CompressedImage, Image, Imu, Joy, LaserScan
+from slam_toolbox.srv import Reset
 from std_msgs.msg import Bool, String
 
 from spot_micro_deck import param_file
@@ -197,6 +198,7 @@ class DeckBridge(Node):
         self._last_change = 0.0
         self.add_on_set_parameters_callback(self._on_own_params)
 
+        self._slam_reset = self.create_client(Reset, '/slam_toolbox/reset')
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
@@ -659,6 +661,9 @@ class DeckBridge(Node):
         self._gait_params.set_parameters([param], done)
 
     def _run_action(self, key):
+        if key == 'clear_map':
+            self._clear_map()
+            return
         if key != 'shutdown':
             self._ack(key, False, True, 'not implemented')
             return
@@ -681,6 +686,18 @@ class DeckBridge(Node):
 
         # A moment for the ack to reach the Deck before the network goes down.
         threading.Timer(1.0, poweroff).start()
+
+    def _clear_map(self):
+        if not self._slam_reset.service_is_ready():
+            self._ack('clear_map', False, True, 'SLAM not running (hold L1+R1 to start the stack)')
+            return
+
+        def done(future):
+            ok = future.exception() is None
+            self._ack('clear_map', ok, True, 'Map cleared' if ok else f'reset failed: {future.exception()}')
+
+        self._slam_reset.call_async(Reset.Request()).add_done_callback(done)
+        self.get_logger().info('Deck: clearing the SLAM map.')
 
     # ── state summary ────────────────────────────────────────────────────────
 
