@@ -16,6 +16,10 @@ The Deck has no ROS install, so it talks to the robot through a Mosquitto broker
     its parameter services, the bridge's own video settings directly. Accepted
     changes are also written into the params YAML files (gait_params_files /
     bridge_params_files, set by deck.launch.py), so the next launch uses them.
+  * Map actions from the settings menu: clear the SLAM map, or save it into
+    `maps_dir` as map_<date>_<time> — a map_server .pgm/.yaml (the static map)
+    plus slam_toolbox's serialized pose graph (.posegraph/.data, which its
+    localization mode can load). static_map.* symlinks point at the newest save.
 
 Camera and lidar subscriptions only exist while a Deck is online and looking at
 that view, and depth is only colorized/encoded while the depth view is on
@@ -50,7 +54,7 @@ from rclpy.qos import (DurabilityPolicy, QoSProfile, ReliabilityPolicy,
 from rclpy.time import Time
 from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import CompressedImage, Image, Imu, Joy, LaserScan
-from slam_toolbox.srv import Reset
+from slam_toolbox.srv import Reset, SaveMap, SerializePoseGraph
 from std_msgs.msg import Bool, String
 
 from spot_micro_deck import param_file
@@ -132,6 +136,8 @@ class DeckBridge(Node):
         # (deck.launch.py fills these in); empty = changes last until restart.
         self.declare_parameter('gait_params_files', '')
         self.declare_parameter('bridge_params_files', '')
+        # Where the Deck's "Save map" writes the SLAM map ('~' is expanded).
+        self.declare_parameter('maps_dir', '~/spotmicro_maps')
 
         p = self.get_parameter
         self._t = P.topics(p('topic_prefix').value)
@@ -199,6 +205,10 @@ class DeckBridge(Node):
         self.add_on_set_parameters_callback(self._on_own_params)
 
         self._slam_reset = self.create_client(Reset, '/slam_toolbox/reset')
+        self._slam_save = self.create_client(SaveMap, '/slam_toolbox/save_map')
+        self._slam_serialize = self.create_client(SerializePoseGraph, '/slam_toolbox/serialize_map')
+        self._maps_dir = os.path.expanduser(p('maps_dir').value)
+        self._saving_map = False
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
@@ -664,6 +674,9 @@ class DeckBridge(Node):
         if key == 'clear_map':
             self._clear_map()
             return
+        if key == 'save_map':
+            self._save_map()
+            return
         if key != 'shutdown':
             self._ack(key, False, True, 'not implemented')
             return
@@ -698,6 +711,60 @@ class DeckBridge(Node):
 
         self._slam_reset.call_async(Reset.Request()).add_done_callback(done)
         self.get_logger().info('Deck: clearing the SLAM map.')
+
+    def _save_map(self):
+        key = 'save_map'
+        if not (self._slam_save.service_is_ready() and self._slam_serialize.service_is_ready()):
+            self._ack(key, False, True, 'SLAM not running (hold L1+R1 to start the stack)')
+            return
+        if self._saving_map:
+            self._ack(key, False, True, 'already saving')
+            return
+        try:
+            os.makedirs(self._maps_dir, exist_ok=True)
+        except OSError as exc:
+            self._ack(key, False, True, f'cannot create {self._maps_dir}: {exc}')
+            return
+        name = time.strftime('map_%Y%m%d_%H%M%S')
+        base = os.path.join(self._maps_dir, name)
+        self._saving_map = True
+
+        def fail(text):
+            self._saving_map = False
+            self._ack(key, False, True, text)
+
+        # slam_toolbox's save_map shells out to nav2's map_saver_cli (.pgm + .yaml);
+        # serialize_map writes the pose graph. Image first: it's what the Deck shows.
+        def serialized(future):
+            if future.exception() is not None or future.result().result != 0:
+                fail(f'map image saved, pose graph failed: {future.exception() or "write error"}')
+                return
+            for ext in ('.yaml', '.pgm', '.posegraph', '.data'):
+                link = os.path.join(self._maps_dir, 'static_map' + ext)
+                try:
+                    if os.path.lexists(link):
+                        os.remove(link)
+                    os.symlink(name + ext, link)
+                except OSError as exc:
+                    self.get_logger().warn(f'Could not link {link}: {exc}')
+            self._saving_map = False
+            self._ack(key, True, True, f'Map saved: {name}')
+            self.get_logger().info(f'Deck: saved the SLAM map to {base}.*')
+
+        def saved(future):
+            if future.exception() is not None:
+                fail(f'save failed: {future.exception()}')
+                return
+            if future.result().result != 0 or not os.path.isfile(base + '.yaml'):
+                fail('save failed: no map yet' if future.result().result == 1 else 'save failed')
+                return
+            self._slam_serialize.call_async(
+                SerializePoseGraph.Request(filename=base)).add_done_callback(serialized)
+
+        req = SaveMap.Request()
+        req.name.data = base
+        self._slam_save.call_async(req).add_done_callback(saved)
+        self.get_logger().info(f'Deck: saving the SLAM map to {base}.*')
 
     # ── state summary ────────────────────────────────────────────────────────
 

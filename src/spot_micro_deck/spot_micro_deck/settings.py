@@ -96,6 +96,9 @@ SETTINGS = [
     # ── Map ──
     Setting('clear_map', 'Clear map', 'Map', 'action', 'bridge',
             help='Wipes the SLAM map and starts a new one from where the robot stands. Press A twice.'),
+    Setting('save_map', 'Save map', 'Map', 'action', 'bridge',
+            help='Saves the current SLAM map on the robot (~/spotmicro_maps, newest = static_map). '
+                 'Press A twice.'),
     # ── Robot ──
     Setting('shutdown', 'Shut down robot', 'Robot', 'action', 'bridge',
             help='Powers the robot\'s computer off (disarm first). Press A twice. '
