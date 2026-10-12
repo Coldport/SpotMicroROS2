@@ -119,14 +119,33 @@ DISPLAY=:1 ros2 launch sllidar_ros2 view_sllidar_a2m12_launch.py serial_port:=/d
 ```
 RViz should appear inside the VNC session.
 
-## Camera (Intel RealSense D405 depth camera)
+## Camera (Intel RealSense D405 depth camera, or a plain USB webcam)
 
-`src/spot_micro_camera` launches the apt-installed `ros-jazzy-realsense2-camera` driver with params
-tuned for the robot's [RealSense D405](https://www.intelrealsense.com/depth-camera-d405/),
-publishing color and depth as standard ROS2 image topics.
+`src/spot_micro_camera` works out which camera is plugged in and starts the matching driver:
+
+| Plugged in | Driver | Topics | Depth |
+|---|---|---|---|
+| RealSense D405 | `realsense2_camera` | `/spotmicro_cam/d405/...` | yes |
+| any USB (UVC) webcam | `usb_cam` | `/spotmicro_cam/usb/image_raw` (+ `/compressed`) | no |
+
+Detection reads sysfs only (`spot_micro_camera/detect.py`), so it never touches a running driver.
+If both are plugged in the RealSense wins. Check what it sees with
+`python3 -m spot_micro_camera.detect`. Force one with `camera_type:=realsense` / `camera_type:=usb`
+(on `camera.launch.py` or `robot.launch.py`); `video_device:=/dev/videoN` overrides the webcam
+device. If nothing is plugged in, no camera driver is started.
+
+`deck_bridge` follows whichever camera is streaming, and the Steam Deck app shows it in the top bar
+(`D405 · depth` or `USB · <model>`). With the USB webcam the Depth view is skipped and explains why.
+The webcam settings live in `config/usb_cam_params.yaml` (640x480 YUYV at 30 fps — the MJPEG modes
+segfaulted `usb_cam` on the Anker C200).
+
+The rest of this section is about the D405. `camera.launch.py` launches the apt-installed
+`ros-jazzy-realsense2-camera` driver with params tuned for the robot's
+[RealSense D405](https://www.intelrealsense.com/depth-camera-d405/), publishing color and depth as
+standard ROS2 image topics.
 
 `./setup.sh` installs `ros-jazzy-realsense2-camera` (which pulls in `librealsense2` and the `rs-*`
-command-line tools) and a udev rule that makes the camera's `/dev/videoN` nodes and USB device
+command-line tools), `ros-jazzy-usb-cam` for the webcam fallback, and a udev rule that makes the camera's `/dev/videoN` nodes and USB device
 readable without sudo. Plug the camera into a **USB 3** port (blue) — it's on USB 3.2 in the
 tested setup, and Intel recommends USB 3 for the full-rate streams.
 
@@ -289,6 +308,27 @@ installs it) — slam_toolbox doesn't declare that dependency, and without it th
 Steam Deck, including in Gaming Mode. It shows the robot's camera as the main display with status
 readouts, the SLAM map as a minimap in the lower-left (like a game HUD), and sends the Deck's
 controller input back to the robot. **L2 cycles the main view: camera → depth → lidar → map.**
+The top bar shows the link, robot, gait (`Gait off` / `Disarmed` / `ARMED`) and which camera the
+robot has.
+
+**Settings menu — press Start (☰).** D-pad ↑↓ picks a setting, ←→ changes it (hold to repeat),
+A flips switches. Changes go to the robot immediately and a toast confirms or says why they were
+refused (e.g. switching gait while walking). The list is sent by the robot
+(`src/spot_micro_deck/spot_micro_deck/settings.py`), so the app needs no update to expose another
+parameter:
+
+- **Walk** — gait (crawl/trot), speed, step rate, stride length, strafe stride, foot lift, turn rate,
+  max foot reach, stick deadzone, settle speed
+- **Body** — body height, R1/L1 height rate, front/rear foot placement, stance width
+- **Balance** — body sway on/off, side-to-side and front/back sway, max sway, four-feet-down time,
+  sway overlap
+- **Leveling** — IMU leveling on/off, gain, max correction, roll/pitch trim
+- **Video** — frame cap, depth JPEG quality, depth colour range
+
+Gait settings are `gait_node` parameters set through its parameter services (`ros2 param set
+/gait_node <name> <value>` works too). They last until the stack restarts — copy values you like
+into `src/spot_micro_move/config/move_params.yaml`. Gait rows are greyed out while the gait node
+isn't running.
 
 ```
 Steam Deck app ──MQTT──► Mosquitto broker (on the robot) ◄──► deck_bridge node ◄──► ROS2
@@ -376,8 +416,8 @@ Until it connects, the screen says why (broker unreachable + the error, or robot
 
 ### Controls and what the robot receives
 
-Only L2 does something in the app itself (Tab/Space also cycle views on a keyboard). Everything else
-is published for later use on **`/spotmicro_deck/joy`** (`sensor_msgs/Joy`, ~30 Hz, header frame
+In the app itself L2 changes view and Start opens settings (keyboard: Tab/Space, M, arrows, Enter).
+Every button is also published for later use on **`/spotmicro_deck/joy`** (`sensor_msgs/Joy`, ~30 Hz, header frame
 `deck`) — the gait/teleop code can subscribe to it. It publishes all zeros if the Deck disconnects
 or goes quiet for 0.5 s, and `/spotmicro_deck/connected` (`std_msgs/Bool`) says whether a Deck is
 connected.
@@ -394,6 +434,95 @@ not the inverted −1..1 of ROS's xbox joy driver.
 `15-18 paddle1-4` (the Deck's back buttons: SDL's P1/P2 are the right/left upper R4/L4, P3/P4 the
 right/left lower R5/L5), `19 l2`, `20 r2` (digital copies of the triggers). The same names are in
 `src/spot_micro_deck/spot_micro_deck/protocol.py`, which defines all the MQTT topics and payloads.
+
+### Robot modes: sentry and calibration
+
+Once armed (L3+R3 held 3 s), gait_node has two extra modes; the Deck shows a pill in the top bar
+and a card at the bottom while one is on.
+
+* **Sentry** — double-tap **Y** (again to leave). The feet stay planted and the sticks pose the
+  body: left stick X rolls, left stick Y pitches, right stick X yaws (limits under *Sentry* in the
+  settings menu). R1/L1 still change the height.
+* **Calibration** — hold **Y + D-pad up** for 3 s (again to leave). Every foot goes to IK
+  `calib_pose` (default 0, 0, 120 — feet under the shoulders, the pose the offsets in
+  `config/servo_calibration.yaml` were verified at) with no stance, trim or leveling. **L1/R1** pick
+  the leg, **L2/R2** the joint (L2 doesn't change the view meanwhile), **D-pad up/down** changes
+  that servo's offset by 1°, **right/left** by 0.25° (hold to repeat). Changes are live; leaving
+  the mode — or disarming, or B — writes them into `servo_calibration.yaml`
+  (`servo_calibration.txt` isn't touched). While the settings menu is open the D-pad and A only
+  drive the menu, so they can't also nudge an offset.
+
+### Tricks
+
+Armed and in walk mode, **X** plays a scripted move (`src/spot_micro_move/spot_micro_move/tricks.py`).
+The robot glides to its stand pose first and goes back to walk when it's done. Press **X** again to
+stop early, or **B** to go limp.
+
+| Input | Trick |
+| --- | --- |
+| X once | butt shake |
+| X twice | dance (~9 s) |
+| X three times | push-ups |
+| X held + D-pad up | handshake (front-right paw) |
+| X held + D-pad down | sit |
+| X held + D-pad left | play bow |
+| X held + D-pad right | pee (rear-left leg up) |
+
+Before a paw comes off the ground, the body shifts over the other three feet. The mapping is
+`trick_taps` / `trick_dpad` in `move_params.yaml`. To add a trick, write a keyframe function in
+`tricks.py` and add it to `TRICKS`.
+
+### IMU: zero and axis calibration
+
+Both go through the `spot_micro_imu` node, which publishes everything in the robot's body frame
+(x forward, y left, z up). It saves the result into `imu_params.yaml` (`mount_quaternion`,
+`yaw_offset_deg`), so the leveling, the Deck's roll/pitch readout and anything else that reads
+`/spotmicro_imu/imu/data` all agree. The Deck shows a toast with the result.
+
+* **Zero** — hold **Y + D-pad down** for 1 s (armed or not), with the robot standing still on
+  flat ground. The current attitude becomes level and the current heading becomes yaw 0. This
+  replaces gait_node's `level_trim_roll` / `level_trim_pitch`, so keep those at 0.
+* **Axis calibration** — hold **Y + D-pad left** for 1 s (again, or B, to cancel). Use this when
+  the IMU is mounted in a different orientation, so roll and pitch come out swapped or flipped.
+  It works like a drone's accelerometer calibration: the Deck asks for five poses in turn —
+  **level**, **left side down**, **right side down**, **nose down**, **nose up** — and records
+  gravity in each one. The side tilts give the robot's forward axis and the nose tilts its
+  sideways axis. Each axis is found on its own, then the two are checked against each other, so
+  a pose done the wrong way round (say left and right swapped) is caught and you're asked to
+  redo it rather than getting a flipped result.
+  * *Disarmed (by hand)*: hold or tip the robot as the card says, about 20°. The card has a live
+    tilt gauge (it needs 12°) and a hold-still bar. A pose records after about 1 s of stillness,
+    and only once it's 12° away from every pose already done, so the pose you're still holding
+    from the last step doesn't count twice. Each step times out after 60 s.
+  * *Armed*: the robot does it itself on flat ground, tilting `imu_calib_roll_deg` (15°) each way.
+
+  Calibration also zeroes the IMU, because the "level" step defines level. `imu_roll_sign`,
+  `imu_pitch_sign` and `imu_swap_roll_pitch` should then stay at their defaults.
+
+### Shutting the robot down
+
+**☰ → Robot → Shut down robot**, then press **A twice** (the second press within 3 s). deck_bridge
+runs `sudo -n systemctl poweroff`, so its user needs passwordless sudo, as the robot's default user
+has. It refuses while the robot is armed, because the servos would let go and the robot would
+drop: disarm first with L3+R3. Once the Pi's green light stops blinking (about 20 s), it's safe to
+switch the power off.
+
+### Wi-Fi setup over Bluetooth
+
+If the Deck can't reach the robot (different Wi-Fi networks), the "Connecting to …" screen offers
+**X — set it up over Bluetooth**. The app finds the robot by its Bluetooth name (`SpotMicro`),
+pairs ("just works", no PIN), and asks it for its Wi-Fi. If both are on the same network it just
+uses the IP the robot reports; otherwise it sends the Deck's own network name and password (read
+from NetworkManager, or from `~/.config/spotmicro-deck/wifi`: SSID on line 1, password on line 2),
+the robot joins it, and the app saves the robot's new IP in `~/.config/spotmicro-deck/host` and
+restarts on it.
+
+Robot side: `spotmicro-wifi-provision.service` (installed by `setup.sh`; needs BlueZ, which Ubuntu
+server images lack — `setup.sh` installs it) runs `spot_micro_deck/wifi_provision.py` as root. It
+adds joined networks to `/etc/netplan/60-spotmicro-wifi.yaml` (alongside the existing ones) and
+removes one again if joining fails, so a wrong password can't strand the robot. New devices can
+only pair in the first 10 minutes after boot or while the robot has no Wi-Fi; a Deck that already
+paired can connect any time.
 
 ### What has and hasn't been tested
 

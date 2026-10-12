@@ -1,5 +1,6 @@
 //! Rendering: the main view (camera / depth / lidar / map), the HUD (top bar,
-//! status card, minimap, controller card), the settings drawer and toasts.
+//! status card, minimap, controller card), the settings drawer, the controls
+//! reference and toasts.
 //! Everything is drawn with SDL2's 2D renderer at a fixed 1280x800 logical
 //! size (the Steam Deck's native resolution); SDL scales it to whatever display
 //! the app is on. Text comes from text.rs; rounded shapes are built from one
@@ -186,6 +187,8 @@ impl Ui {
         }
         if menu.open {
             self.draw_settings(canvas, snap, menu);
+        } else if menu.controls_open {
+            self.draw_controls_help(canvas);
         } else {
             self.draw_controls(canvas, snap);
             match snap.mode().cloned() {
@@ -193,7 +196,9 @@ impl Ui {
                 None => self.draw_hints(canvas),
             }
         }
-        self.draw_overlay(canvas, snap, menu.open);
+        if !menu.controls_open {
+            self.draw_overlay(canvas, snap, menu.open);
+        }
         self.draw_toast(canvas, menu);
     }
 
@@ -707,7 +712,7 @@ impl Ui {
     }
 
     fn draw_hints(&mut self, canvas: &mut Canvas<Window>) {
-        let hints = [("☰", "Settings"), ("L1+R1", "Start"), ("L3+R3", "Arm"), ("Y×2", "Sentry"), ("X", "Tricks"), ("B", "Stop")];
+        let hints = [("☰", "Settings"), ("View", "Controls"), ("L1+R1", "Start"), ("L3+R3", "Arm"), ("X", "Tricks"), ("B", "Stop")];
         let widths: i32 = hints
             .iter()
             .map(|(k, l)| self.font.width(k, Weight::Bold, 12).max(12) + 14 + 6 + self.font.width(l, Weight::Regular, 14) + 18)
@@ -742,11 +747,12 @@ impl Ui {
         }
         if m.mode == "imu_calib" {
             let Some(c) = m.imu_calib.clone() else { return };
-            let h = 150;
+            let gauge = !c.auto && c.tilt.is_some();
+            let h = if gauge { 196 } else { 150 };
             let r = Rect::new(left, LOGICAL_H as i32 - M - h, w as u32, h as u32);
-            self.card(canvas, r, if c.auto { "IMU axes — robot rolls itself" } else { "IMU axes — by hand" });
-            // Step trail: Level · Right · Left, the current one highlighted.
-            let steps = [("level", "Level"), ("right", "Right down"), ("left", "Left down")];
+            self.card(canvas, r, if c.auto { "IMU axes — robot tilts itself" } else { "IMU axes — by hand" });
+            // Step trail, the current one highlighted, done ones green.
+            let steps = [("level", "Level"), ("left", "Left ↓"), ("right", "Right ↓"), ("front", "Nose ↓"), ("back", "Nose ↑")];
             let current = steps.iter().position(|(k, _)| *k == c.step).unwrap_or(steps.len());
             let mut x = r.x() + 16;
             for (i, (_, label)) in steps.iter().enumerate() {
@@ -764,6 +770,33 @@ impl Ui {
             }
             let prompt = self.font.fit(&c.prompt, Weight::Bold, 18, w - 32);
             self.text(canvas, &prompt, r.x() + 16, r.y() + 74, Weight::Bold, 18, TEXT);
+            if gauge {
+                // Tilt gauge (fills to the needed tilt, green once there) and hold-still bar.
+                let tilt = c.tilt.unwrap_or(0.0);
+                let need = c.need.unwrap_or(12.0).max(1.0);
+                let hold = c.hold.unwrap_or(0.0).clamp(0.0, 1.0);
+                let (bx, bw) = (r.x() + 16 + 70, (w - 32 - 70 - 90) / 2);
+                let y = r.y() + 112;
+                for (i, (label, frac, done, value)) in [
+                    ("Tilt", if c.step == "level" { 1.0 } else { (tilt / need).min(1.0) }, c.step == "level" || tilt >= need,
+                     if c.step == "level" { "level".to_string() } else { format!("{tilt:.0}° / {need:.0}°") }),
+                    ("Still", hold, hold >= 1.0, format!("{:.0}%", hold * 100.0)),
+                ].into_iter().enumerate() {
+                    let yy = y + i as i32 * 26;
+                    self.text(canvas, label, r.x() + 16, yy - 4, Weight::Regular, 14, MUTED);
+                    let track = Rect::new(bx, yy, (bw * 2) as u32, 10);
+                    self.fill_round(canvas, track, 5, TRACK);
+                    let fw = ((bw * 2) as f32 * frac) as i32;
+                    if fw > 0 {
+                        self.fill_round(canvas, Rect::new(bx, yy, fw as u32, 10), 5, if done { GOOD } else { ACCENT });
+                    }
+                    self.text(canvas, &value, bx + bw * 2 + 12, yy - 4, Weight::Bold, 14, TEXT);
+                }
+                if !c.hint.is_empty() {
+                    let hint = self.font.fit(&c.hint, Weight::Regular, 14, w / 2);
+                    self.text_right(canvas, &hint, r.right() - 16, r.bottom() - 30, Weight::Regular, 14, WARN);
+                }
+            }
             let mut x = r.x() + 16;
             let y = r.bottom() - 34;
             x += self.keycap(canvas, "Y+←", "Cancel", x, y) + 18;
@@ -985,6 +1018,15 @@ impl Ui {
             TEXT
         };
         match it.kind.as_str() {
+            "action" => {
+                // A red button; after the first A it asks for the second.
+                let armed = menu.action_armed(&it.key);
+                let label = if armed { "Press A again" } else { "A × 2" };
+                let w = self.font.width(label, Weight::Bold, 14) + 28;
+                let fill = if !avail { TRACK } else if armed { BAD } else { with_alpha(BAD, 70) };
+                self.fill_round(canvas, Rect::new(right - w, cy - 14, w as u32, 28), 14, fill);
+                self.text_center(canvas, label, right - w / 2, cy - 9, Weight::Bold, 14, if avail { TEXT } else { FAINT });
+            }
             "bool" => {
                 let on = value.as_bool().unwrap_or(false);
                 let (sw, sh) = (46, 26);
@@ -1032,6 +1074,94 @@ impl Ui {
                 }
             }
         }
+    }
+
+    // ── controls reference ───────────────────────────────────────────────────
+
+    /// Full-screen cheat sheet (View button): every robot control and trick
+    /// trigger. Mirrors gait_node / stack_launcher defaults (move_params.yaml).
+    fn draw_controls_help(&mut self, canvas: &mut Canvas<Window>) {
+        let r = Rect::new(M, TOP_H + M, LOGICAL_W - 2 * M as u32, LOGICAL_H - (TOP_H + 2 * M) as u32);
+        self.fill_round(canvas, r, RADIUS, Color::RGBA(15, 19, 27, 246));
+        canvas.set_draw_color(HAIRLINE);
+        let _ = canvas.draw_line(Point::new(r.x() + RADIUS, r.y()), Point::new(r.right() - RADIUS, r.y()));
+        self.text(canvas, "Controls", r.x() + 24, r.y() + 18, Weight::Bold, 28, TEXT);
+        self.text(canvas, "Robot buttons work once the stack is running and the robot is armed.", r.x() + 24, r.y() + 58, Weight::Regular, 14, MUTED);
+
+        // (keycap, what it does, extra detail)
+        type Row = (&'static str, &'static str, &'static str);
+        let columns: [&[(&str, &[Row])]; 3] = [
+            &[
+                ("Start up", &[
+                    ("L1+R1", "Start / stop the robot stack", "hold 3 s"),
+                    ("L3+R3", "Arm / disarm the servos", "hold 3 s — disarmed = limp"),
+                    ("B", "Emergency stop", "goes limp; re-arm with L3+R3"),
+                ]),
+                ("Walking", &[
+                    ("L stick", "Walk forward / back, strafe", ""),
+                    ("R stick ←→", "Turn", ""),
+                    ("R1", "Raise body", "hold"),
+                    ("L1", "Lower body", "hold"),
+                ]),
+            ],
+            &[
+                ("Tricks — armed, walking", &[
+                    ("X", "Butt shake", ""),
+                    ("X ×2", "Dance", ""),
+                    ("X ×3", "Push-ups", ""),
+                    ("X + ↑", "Handshake", "hold X, press ↑"),
+                    ("X + ↓", "Sit", ""),
+                    ("X + ←", "Bow", ""),
+                    ("X + →", "Pee", ""),
+                    ("X", "Stop the trick early", "while one is playing"),
+                ]),
+            ],
+            &[
+                ("Modes", &[
+                    ("Y ×2", "Sentry: sticks tilt the body", "L tilt, R twist; Y ×2 again to leave"),
+                    ("Y + ↑", "Servo calibration", "hold 3 s; L1/R1 leg, L2/R2 joint, D-pad trims"),
+                    ("Y + ↓", "Zero the IMU", "hold 1 s, standing on flat ground"),
+                    ("Y + ←", "Calibrate IMU axes", "hold 1 s; follow the prompts"),
+                ]),
+                ("This app", &[
+                    ("L2", "Next view", "camera, depth, lidar, map"),
+                    ("☰", "Settings", "D-pad + A"),
+                    ("View", "Show / hide this screen", ""),
+                    ("X", "Wi-Fi setup over Bluetooth", "only while not connected"),
+                ]),
+            ],
+        ];
+        const GAP: i32 = 24;
+        const KEY_W: i32 = 112;
+        let col_w = (r.width() as i32 - 2 * 24 - 2 * GAP) / 3;
+        for (c, sections) in columns.iter().enumerate() {
+            let x0 = r.x() + 24 + c as i32 * (col_w + GAP);
+            let mut y = r.y() + 96;
+            for (title, rows) in sections.iter() {
+                self.text(canvas, &title.to_uppercase(), x0, y, Weight::Bold, 12, ACCENT);
+                y += 26;
+                for (key, label, detail) in rows.iter() {
+                    self.keycap(canvas, key, "", x0, y);
+                    let lw = col_w - KEY_W;
+                    let label = self.font.fit(label, Weight::Bold, 16, lw);
+                    self.text(canvas, &label, x0 + KEY_W, y + 1, Weight::Bold, 16, TEXT);
+                    y += 26;
+                    if !detail.is_empty() {
+                        let d = self.font.fit(detail, Weight::Regular, 14, lw);
+                        self.text(canvas, &d, x0 + KEY_W, y - 2, Weight::Regular, 14, MUTED);
+                        y += 20;
+                    }
+                    y += 8;
+                }
+                y += 14;
+            }
+        }
+
+        let fy = r.bottom() - 46;
+        canvas.set_draw_color(HAIRLINE);
+        let _ = canvas.draw_line(Point::new(r.x() + 16, fy - 10), Point::new(r.right() - 16, fy - 10));
+        self.text(canvas, "Trick buttons are the defaults (trick_taps / trick_dpad in move_params.yaml).", r.x() + 24, fy + 4, Weight::Regular, 14, FAINT);
+        self.keycap(canvas, "View", "Close", r.right() - 120, fy);
     }
 
     // ── messages ─────────────────────────────────────────────────────────────

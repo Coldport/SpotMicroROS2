@@ -1,9 +1,10 @@
 //! SpotMicro Steam Deck app: live camera / depth / lidar / map from the robot,
 //! the Deck's controller input sent back to it, and a settings menu (Start/☰)
-//! for the robot's live-tunable gait and video settings — all over MQTT.
+//! for the robot's live-tunable gait and video settings — all over MQTT. The
+//! View (⧉) button shows every control and trick trigger.
 //!
 //! Usage: spotmicro-deck [--host HOST[:PORT]] [--port N] [--user U --password P]
-//!                       [--prefix TOPIC_PREFIX] [--windowed] [--menu]
+//!                       [--prefix TOPIC_PREFIX] [--windowed] [--menu] [--controls]
 //! The host can also come from $SPOTDECK_HOST or ~/.config/spotmicro-deck/host.
 
 mod bt;
@@ -44,6 +45,8 @@ struct Args {
     software: bool,
     /// Start with the settings menu open (handy with --screenshot).
     menu: bool,
+    /// Start with the controls reference open.
+    controls: bool,
     /// Start on this view (color | depth | lidar | map).
     view: Option<View>,
     /// Save a screenshot of the current view after N seconds, then quit.
@@ -66,6 +69,7 @@ fn parse_args() -> Result<Args, String> {
             "--password" => a.password = Some(value("--password")?),
             "--windowed" => a.windowed = true,
             "--menu" => a.menu = true,
+            "--controls" => a.controls = true,
             "--view" => {
                 let name = value("--view")?;
                 a.view = Some(View::ALL.into_iter().find(|v| v.wire_name() == name).ok_or("bad --view")?);
@@ -86,8 +90,9 @@ fn parse_args() -> Result<Args, String> {
             "-h" | "--help" => {
                 println!(
                     "spotmicro-deck [--host HOST[:PORT]] [--port N] [--user U --password P] \
-                     [--prefix P] [--windowed] [--menu]\n\
+                     [--prefix P] [--windowed] [--menu] [--controls]\n\
                      Start/☰ opens the robot settings menu (D-pad to select and adjust).\n\
+                     View/⧉ shows all controls and trick triggers.\n\
                      Host also from $SPOTDECK_HOST or ~/.config/spotmicro-deck/host (default spotmicro.local)."
                 );
                 std::process::exit(0);
@@ -236,6 +241,7 @@ fn run() -> Result<(), String> {
     let mut view = args.view.unwrap_or(View::Color);
     let mut menu = Menu::default();
     menu.open = args.menu;
+    menu.controls_open = args.controls && !args.menu;
     let mut last_note_seq: Option<u64> = None;
     let mut depth_ok = true;
     // L2 / Tab: next view, skipping Depth when the robot's camera has none.
@@ -296,6 +302,7 @@ fn run() -> Result<(), String> {
                 Event::KeyDown { keycode: Some(k), .. } => match k {
                     Keycode::Tab | Keycode::Space => actions.push(Action::NextView),
                     Keycode::M | Keycode::F1 => actions.push(Action::ToggleMenu),
+                    Keycode::H | Keycode::F2 => actions.push(Action::ToggleControls),
                     Keycode::Up => actions.push(Action::Nav(Dir::Up)),
                     Keycode::Down => actions.push(Action::Nav(Dir::Down)),
                     Keycode::Left => actions.push(Action::Nav(Dir::Left)),
@@ -346,6 +353,10 @@ fn run() -> Result<(), String> {
                 }
                 Action::ToggleMenu => {
                     menu.toggle();
+                    None
+                }
+                Action::ToggleControls => {
+                    menu.toggle_controls();
                     None
                 }
                 Action::Nav(d) if menu.open => menu.navigate(d, &settings),

@@ -14,6 +14,8 @@ use crate::shared::{SettingAck, SettingItem};
 /// A sent value is shown until the robot confirms it, or this long.
 const PENDING_TIMEOUT: Duration = Duration::from_secs(3);
 const TOAST_FOR: Duration = Duration::from_millis(2600);
+/// An "action" row (e.g. Shut down robot) needs a second A within this long.
+const CONFIRM_WITHIN: Duration = Duration::from_secs(3);
 
 pub struct Toast {
     pub text: String,
@@ -35,9 +37,13 @@ impl Toast {
 #[derive(Default)]
 pub struct Menu {
     pub open: bool,
+    /// The controls & tricks reference (View button); only one of the two is open.
+    pub controls_open: bool,
     pub selected: usize,
     pending: HashMap<String, (Value, Instant)>,
     pub toast: Option<Toast>,
+    /// Action row waiting for its confirming second A press.
+    armed_action: Option<(String, Instant)>,
 }
 
 /// A value change to send to the robot.
@@ -62,6 +68,7 @@ pub fn format_value(item: &SettingItem, v: &Value) -> String {
             None => "—".into(),
         },
         "enum" => v.as_str().map(str::to_string).unwrap_or_else(|| "—".into()),
+        "action" => String::new(),
         _ => match v.as_f64() {
             Some(f) => {
                 let n = format!("{:.*}", decimals(item.step.unwrap_or(1.0)), f);
@@ -119,6 +126,12 @@ pub fn fraction(item: &SettingItem, v: &Value) -> Option<f32> {
 impl Menu {
     pub fn toggle(&mut self) {
         self.open = !self.open;
+        self.controls_open = false;
+    }
+
+    pub fn toggle_controls(&mut self) {
+        self.controls_open = !self.controls_open;
+        self.open = false;
     }
 
     /// The value to show: what we just sent, until the robot catches up.
@@ -148,13 +161,34 @@ impl Menu {
         }
     }
 
-    /// A: flip a switch / cycle an option list. Numbers are changed with left/right.
+    /// A: flip a switch / cycle an option list / press an action button (twice,
+    /// within CONFIRM_WITHIN). Numbers are changed with left/right.
     pub fn confirm(&mut self, items: &[SettingItem]) -> Option<Change> {
         let item = items.get(self.selected)?;
         match item.kind.as_str() {
             "bool" | "enum" => self.adjust(item, 1),
+            "action" => self.press_action(item),
             _ => None,
         }
+    }
+
+    /// True while `key`'s action is waiting for its second A.
+    pub fn action_armed(&self, key: &str) -> bool {
+        matches!(&self.armed_action, Some((k, at)) if k == key && at.elapsed() < CONFIRM_WITHIN)
+    }
+
+    fn press_action(&mut self, item: &SettingItem) -> Option<Change> {
+        if !item.available {
+            self.notify(format!("{}: robot not reachable", item.label), false);
+            return None;
+        }
+        if self.action_armed(&item.key) {
+            self.armed_action = None;
+            return Some((item.key.clone(), Value::Bool(true)));
+        }
+        self.armed_action = Some((item.key.clone(), Instant::now()));
+        self.notify(format!("Press A again to confirm: {}", item.label), false);
+        None
     }
 
     fn adjust(&mut self, item: &SettingItem, dir: i32) -> Option<Change> {
@@ -172,7 +206,9 @@ impl Menu {
     pub fn on_ack(&mut self, ack: &SettingAck, items: &[SettingItem]) {
         let item = items.iter().find(|i| i.key == ack.key);
         let label = item.map(|i| i.label.clone()).unwrap_or_else(|| ack.key.clone());
-        if ack.ok {
+        if ack.ok && item.is_some_and(|i| i.kind == "action") {
+            self.notify(if ack.text.is_empty() { format!("{label}: done") } else { ack.text.clone() }, true);
+        } else if ack.ok {
             let shown = item.map(|i| format_value(i, &ack.value)).unwrap_or_else(|| ack.value.to_string());
             self.notify(format!("{label} → {shown}"), true);
         } else {
@@ -264,5 +300,25 @@ mod tests {
         assert_eq!(m.selected, 9);
         m.navigate(Dir::Down, &items);
         assert_eq!(m.selected, 0);
+    }
+
+    #[test]
+    fn action_needs_two_presses_in_time() {
+        let items = vec![SettingItem {
+            key: "shutdown".into(),
+            label: "Shut down robot".into(),
+            kind: "action".into(),
+            available: true,
+            ..Default::default()
+        }];
+        let mut m = Menu::default();
+        assert_eq!(m.confirm(&items), None);
+        assert!(m.action_armed("shutdown"));
+        assert_eq!(m.confirm(&items), Some(("shutdown".to_string(), Value::Bool(true))));
+        assert!(!m.action_armed("shutdown"));
+        // left/right never fire it
+        assert_eq!(m.navigate(Dir::Left, &items), None);
+        assert_eq!(m.navigate(Dir::Right, &items), None);
+        assert_eq!(m.confirm(&items), None);
     }
 }

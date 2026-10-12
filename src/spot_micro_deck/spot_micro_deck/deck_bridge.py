@@ -7,6 +7,15 @@ The Deck has no ROS install, so it talks to the robot through a Mosquitto broker
   * Deck -> robot: turns the Deck's controller input into sensor_msgs/Joy.
   * Robot -> Deck: streams the camera (color, or a colorized depth image), the
     lidar scan, the SLAM map and a JSON robot-state summary.
+  * Works out which camera is in use — the RealSense D405 (color + depth) or a
+    plain USB webcam (color only) — from what is plugged in (sysfs, via
+    spot_micro_camera.detect) and which driver is publishing, follows the right
+    color topic, and tells the Deck (state "camera").
+  * Settings: publishes the live-tunable settings (settings.py) with their
+    current values, and applies changes the Deck sends — gait_node's through
+    its parameter services, the bridge's own video settings directly. Accepted
+    changes are also written into the params YAML files (gait_params_files /
+    bridge_params_files, set by deck.launch.py), so the next launch uses them.
 
 Camera and lidar subscriptions only exist while a Deck is online and looking at
 that view, and depth is only colorized/encoded while the depth view is on
@@ -22,6 +31,7 @@ Publishes (namespaced under 'spotmicro_deck'):
 import json
 import math
 import os
+import subprocess
 import threading
 import time
 import zlib
@@ -33,13 +43,23 @@ import rclpy
 import tf2_ros
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
+from rclpy.parameter import Parameter, parameter_value_to_python
+from rclpy.parameter_client import AsyncParameterClient
 from rclpy.qos import (DurabilityPolicy, QoSProfile, ReliabilityPolicy,
                        qos_profile_sensor_data)
 from rclpy.time import Time
+from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import CompressedImage, Image, Imu, Joy, LaserScan
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 
+from spot_micro_deck import param_file
 from spot_micro_deck import protocol as P
+from spot_micro_deck import settings as S
+
+try:
+    from spot_micro_camera.detect import detect_camera
+except ImportError:          # camera package not built: report only what is streaming
+    detect_camera = None
 
 # Camera frames are big (a color JPEG is ~150 KB), and best-effort transport
 # loses messages that have to be fragmented into many UDP packets, so the image
@@ -49,6 +69,20 @@ _IMAGE_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
 _NO_RETURN_MM = 0xFFFF
 _MAX_SCAN_POINTS = 2048
 _VIEW_HEARTBEAT_TIMEOUT_S = 3.0
+_CAMERA_CHECK_S = 2.0
+_SETTINGS_PERIOD_S = 1.0
+_SAVE_DELAY_S = 1.5          # write params files once the D-pad has been still this long
+# A parameter-service reply that hasn't come back by then is treated as lost. The
+# first call right after gait_node starts is often dropped ("failed to send
+# response (timeout)" in its log) before the service has matched our client;
+# without this the bridge waited on it forever and the Deck showed every
+# setting as unavailable.
+_PARAM_CALL_TIMEOUT_S = 2.0
+_BRIDGE_SETTINGS = [s.key for s in S.SETTINGS if s.target == 'bridge' and s.kind != 'action']
+# Run by the Deck's "Shut down robot" button. Needs passwordless sudo for the
+# bridge's user (the default on a Raspberry Pi / this robot's Ubuntu user).
+_SHUTDOWN_CMD = ['sudo', '-n', 'systemctl', 'poweroff']
+_GAIT_SETTINGS = [s.key for s in S.SETTINGS if s.target == 'gait']
 
 
 def _yaw_from_quat(q):
@@ -73,6 +107,10 @@ class DeckBridge(Node):
         self.declare_parameter('topic_prefix', P.DEFAULT_PREFIX)
 
         self.declare_parameter('color_topic', '/spotmicro_cam/d405/color/image_raw/compressed')
+        self.declare_parameter('usb_color_topic', '/spotmicro_cam/usb/image_raw/compressed')
+        self.declare_parameter('gait_node', '/gait_node')
+        self.declare_parameter('armed_topic', '/spotmicro_move/armed')
+        self.declare_parameter('mode_topic', '/spotmicro_move/mode')
         self.declare_parameter('depth_topic', '/spotmicro_cam/d405/depth/image_rect_raw')
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('map_topic', '/map')
@@ -89,6 +127,10 @@ class DeckBridge(Node):
         self.declare_parameter('depth_min_m', 0.1)
         self.declare_parameter('depth_max_m', 2.0)
         self.declare_parameter('input_timeout_s', 0.5)
+        # ':'-separated params files to write accepted Deck setting changes into
+        # (deck.launch.py fills these in); empty = changes last until restart.
+        self.declare_parameter('gait_params_files', '')
+        self.declare_parameter('bridge_params_files', '')
 
         p = self.get_parameter
         self._t = P.topics(p('topic_prefix').value)
@@ -135,6 +177,25 @@ class DeckBridge(Node):
             'depth': p('depth_topic').value,
             'scan': p('scan_topic').value,
         }
+        self._color_topics = {'realsense': p('color_topic').value, 'usb': p('usb_color_topic').value}
+        self._camera = {'type': None, 'model': '', 'depth': False, 'streaming': False}
+
+        # Settings: gait_node's are read/written through its parameter services.
+        self._gait_params = AsyncParameterClient(self, p('gait_node').value)
+        self._gait_values = {}
+        self._gait_running = False
+        self._gait_get_sent = None     # monotonic time of the outstanding get, or None
+        self._gait_get_seq = 0
+        self._set_pending = {}         # key -> (value, sent at) awaiting gait_node's reply
+        self._armed = False
+        self._mode = None              # gait_node's mode message (dict), see _on_mode
+        self._set_queue = []           # (key, value) from the MQTT thread
+        self._last_settings = 0.0
+        self._save_files = {t: self._params_files(p(f'{t}_params_files').value)
+                            for t in ('gait', 'bridge')}
+        self._unsaved = {'gait': {}, 'bridge': {}}
+        self._last_change = 0.0
+        self.add_on_set_parameters_callback(self._on_own_params)
 
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
@@ -146,6 +207,14 @@ class DeckBridge(Node):
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                        reliability=ReliabilityPolicy.RELIABLE))
         self.create_subscription(Imu, p('imu_topic').value, self._on_imu, qos_profile_sensor_data)
+        self.create_subscription(
+            Bool, p('armed_topic').value, self._on_armed,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                       reliability=ReliabilityPolicy.RELIABLE))
+        self.create_subscription(
+            String, p('mode_topic').value, self._on_mode,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                       reliability=ReliabilityPolicy.RELIABLE))
 
         self._connected_pub.publish(Bool(data=False))
         self._setup_mqtt()
@@ -153,7 +222,13 @@ class DeckBridge(Node):
         self.create_timer(0.1, self._reconcile_subscriptions)
         self.create_timer(0.1, self._watchdog)
         self.create_timer(1.0 / float(p('state_rate_hz').value), self._publish_state)
+        self.create_timer(_CAMERA_CHECK_S, self._update_camera)
+        self.create_timer(0.05, self._settings_tick)
+        self._update_camera()
 
+        for target, files in self._save_files.items():
+            self.get_logger().info(f'Deck {target} setting changes are saved to: '
+                                   f'{", ".join(files) or "(nowhere: they last until restart)"}')
         self.get_logger().info(
             f'Deck bridge up: MQTT {p("mqtt_host").value}:{p("mqtt_port").value}, '
             f'topics under "{p("topic_prefix").value}/". Waiting for a Steam Deck.')
@@ -182,7 +257,7 @@ class DeckBridge(Node):
             return
         self.get_logger().info('Connected to MQTT broker.')
         client.subscribe([(self._t['deck_online'], 1), (self._t['deck_view'], 0),
-                          (self._t['deck_input'], 0)])
+                          (self._t['deck_input'], 0), (self._t['deck_set'], 1)])
         client.publish(self._t['robot_online'], '1', qos=1, retain=True)
         if self._map_payload is not None:
             client.publish(self._t['map'], self._map_payload, qos=1, retain=True)
@@ -197,6 +272,10 @@ class DeckBridge(Node):
                 self._handle_input(msg.payload)
             elif msg.topic == self._t['deck_view']:
                 self._handle_view(msg.payload.decode('utf-8', 'replace').strip())
+            elif msg.topic == self._t['deck_set']:
+                key, value = P.decode_set(msg.payload)
+                with self._lock:
+                    self._set_queue.append((key, value))
             elif msg.topic == self._t['deck_online']:
                 self._handle_deck_online(msg.payload.decode('utf-8', 'replace').strip() == '1')
         except Exception as exc:   # never let a bad message kill the MQTT thread
@@ -269,12 +348,12 @@ class DeckBridge(Node):
             view = self._view
         wanted = {
             'color': active and view == 'color',
-            'depth': active and view == 'depth',
+            'depth': active and view == 'depth' and self._camera['type'] != 'usb',
             'scan': active,
         }
         factories = {
             'color': lambda: self.create_subscription(
-                CompressedImage, self._topic_names['color'], self._on_color, _IMAGE_QOS),
+                CompressedImage, self._color_topic(), self._on_color, _IMAGE_QOS),
             'depth': lambda: self.create_subscription(
                 Image, self._topic_names['depth'], self._on_depth, _IMAGE_QOS),
             'scan': lambda: self.create_subscription(
@@ -393,6 +472,216 @@ class DeckBridge(Node):
         self._imu_rpy = _rpy_deg_from_quat(msg.orientation)
         self._imu_time = time.monotonic()
 
+    # ── camera ───────────────────────────────────────────────────────────────
+
+    def _color_topic(self):
+        return self._color_topics['usb' if self._camera['type'] == 'usb' else 'realsense']
+
+    def _update_camera(self):
+        """Which camera is in use: the driver that is publishing wins; otherwise
+        whatever is plugged in (so the Deck can say "USB webcam, driver not
+        running"). Re-points the color subscription when it changes."""
+        streaming = [kind for kind, topic in self._color_topics.items()
+                     if self.count_publishers(topic) > 0]
+        hw = detect_camera() if detect_camera is not None else None
+        kind = streaming[0] if streaming else (hw.kind if hw is not None else None)
+        if hw is not None and hw.kind == kind:
+            model = hw.model
+        else:
+            model = {'realsense': 'RealSense', 'usb': 'USB camera'}.get(kind, '')
+        camera = {'type': kind, 'model': model, 'depth': kind == 'realsense',
+                  'streaming': bool(streaming)}
+        if camera != self._camera:
+            old_topic = self._color_topic()
+            if camera['type'] != self._camera['type']:
+                self.get_logger().info(
+                    f'Camera: {model or "none"}' + (' (streaming)' if streaming else
+                                                    (' (driver not running)' if kind else '')))
+            self._camera = camera
+            if self._color_topic() != old_topic and 'color' in self._subs:
+                self.destroy_subscription(self._subs.pop('color'))   # reconcile re-creates it
+
+    # ── settings ─────────────────────────────────────────────────────────────
+
+    def _on_own_params(self, params):
+        for prm in params:
+            if prm.name == 'video_max_fps' and prm.value > 0:
+                self._video_period = 1.0 / float(prm.value)
+            elif prm.name == 'jpeg_quality':
+                self._jpeg_quality = int(prm.value)
+            elif prm.name == 'depth_min_m':
+                self._depth_min_mm = float(prm.value) * 1000.0
+            elif prm.name == 'depth_max_m':
+                self._depth_max_mm = float(prm.value) * 1000.0
+        return SetParametersResult(successful=True)
+
+    def _params_files(self, spec):
+        files = []
+        for path in filter(None, spec.split(':')):
+            real = os.path.realpath(path)
+            if not os.path.isfile(real):
+                self.get_logger().warn(f'Params file {path} not found; not saving settings there')
+            elif real not in files:     # --symlink-install: install/ copy is src/
+                files.append(real)
+        return files
+
+    def _remember(self, setting, value):
+        if self._save_files[setting.target]:
+            self._unsaved[setting.target][setting.key] = value
+            self._last_change = time.monotonic()
+
+    def save_settings(self):
+        """Write changed settings into the params files (debounced; also on shutdown)."""
+        for target, values in self._unsaved.items():
+            if not values:
+                continue
+            for path in self._save_files[target]:
+                try:
+                    param_file.update_file(path, values)
+                except Exception as exc:
+                    self.get_logger().error(f'Saving settings to {path} failed: {exc}')
+            self.get_logger().info(f'Saved {", ".join(f"{k}={v}" for k, v in values.items())}')
+            self._unsaved[target] = {}
+
+    def _on_armed(self, msg):
+        self._armed = bool(msg.data)
+
+    def _on_mode(self, msg):
+        try:
+            mode = json.loads(msg.data)
+        except ValueError:
+            return
+        if isinstance(mode, dict):
+            self._mode = mode
+
+    def _settings_tick(self):
+        with self._lock:
+            queue, self._set_queue = self._set_queue, []
+        for key, value in queue:
+            self._apply_setting(key, value)
+        now = time.monotonic()
+        for key, (value, sent) in list(self._set_pending.items()):
+            if now - sent > _PARAM_CALL_TIMEOUT_S:
+                del self._set_pending[key]
+                self._ack(key, False, value, 'gait node did not answer — try again')
+        if now - self._last_change >= _SAVE_DELAY_S:
+            self.save_settings()
+        if now - self._last_settings < _SETTINGS_PERIOD_S:
+            return
+        self._last_settings = now
+        running = self._gait_params.services_are_ready()
+        if not running:
+            self._gait_values = {}
+            self._mode = None
+        self._gait_running = running
+        if self._gait_get_sent is not None and now - self._gait_get_sent > _PARAM_CALL_TIMEOUT_S:
+            self.get_logger().warn('gait_node did not answer a settings read; retrying.',
+                                   throttle_duration_sec=10.0)
+            self._gait_get_sent = None
+        if not self._deck_active():
+            return
+        if running and self._gait_get_sent is None:
+            self._gait_get_sent = now
+            self._gait_get_seq += 1
+            seq = self._gait_get_seq
+            self._gait_params.get_parameters(
+                _GAIT_SETTINGS, lambda future: self._on_gait_values(future, seq))
+        self._publish_settings()
+
+    def _on_gait_values(self, future, seq):
+        if seq != self._gait_get_seq:
+            return                         # a reply we already gave up on
+        self._gait_get_sent = None
+        try:
+            values = future.result().values
+        except Exception as exc:    # node went away mid-call
+            self.get_logger().warn(f'Reading gait_node settings failed: {exc}',
+                                   throttle_duration_sec=10.0)
+            return
+        got = {}
+        for key, v in zip(_GAIT_SETTINGS, values):
+            value = parameter_value_to_python(v)
+            if value is not None:          # NOT_SET: the node doesn't have it
+                got[key] = value
+        self._gait_values = got
+        self._publish_settings()
+
+    def _publish_settings(self):
+        values = dict(self._gait_values)
+        values.update({k: self.get_parameter(k).value for k in _BRIDGE_SETTINGS})
+        msg = S.payload(values, {'gait': self._gait_running, 'bridge': True})
+        self._mqtt.publish(self._t['settings'], json.dumps(msg, separators=(',', ':')), qos=0)
+
+    def _ack(self, key, ok, value=None, text=''):
+        self._mqtt.publish(self._t['settings_ack'], json.dumps(
+            {'key': key, 'ok': ok, 'value': value, 'text': text}, separators=(',', ':')), qos=1)
+        if not ok:
+            self.get_logger().warn(f'Deck setting {key} refused: {text}')
+
+    def _apply_setting(self, key, raw):
+        try:
+            setting, value = S.coerce(key, raw)
+        except S.SettingError as exc:
+            self._ack(key, False, raw, str(exc))
+            return
+        if setting.kind == 'action':
+            self._run_action(key)
+            return
+        param = Parameter(key, value=value)
+        if setting.target == 'bridge':
+            result = self.set_parameters([param])[0]
+            if result.successful:
+                self._remember(setting, value)
+            self._ack(key, result.successful, value, result.reason)
+            self._publish_settings()
+            return
+        if not self._gait_params.services_are_ready():
+            self._ack(key, False, value, 'gait node not running (hold L1+R1 to start the stack)')
+            return
+
+        self._set_pending[key] = (value, time.monotonic())
+
+        def done(future):
+            if self._set_pending.get(key, (None,))[0] == value:
+                del self._set_pending[key]
+            try:
+                result = future.result().results[0]
+            except Exception as exc:
+                self._ack(key, False, value, f'gait node did not answer: {exc}')
+                return
+            if result.successful:
+                self._gait_values[key] = value
+                self._remember(setting, value)
+                self.get_logger().info(f'Deck set {key} = {value}')
+            self._ack(key, result.successful, value, result.reason)
+            self._publish_settings()
+
+        self._gait_params.set_parameters([param], done)
+
+    def _run_action(self, key):
+        if key != 'shutdown':
+            self._ack(key, False, True, 'not implemented')
+            return
+        if self._gait_running and self._armed:
+            # Powering off releases the servos: a standing robot would drop.
+            self._ack(key, False, True, 'disarm first (hold L3+R3) — the robot would drop')
+            return
+        self.get_logger().warn('Shutdown requested from the Deck — powering off.')
+        self._ack(key, True, True, 'Shutting down — wait ~20 s before cutting the power')
+
+        def poweroff():
+            try:
+                result = subprocess.run(_SHUTDOWN_CMD, capture_output=True, text=True, timeout=15)
+                err = result.stderr.strip() if result.returncode else ''
+            except (OSError, subprocess.SubprocessError) as exc:
+                err = str(exc)
+            if err:
+                self.get_logger().error(f'Shutdown failed: {err}')
+                self._ack(key, False, True, f'shutdown failed: {err}')
+
+        # A moment for the ack to reach the Deck before the network goes down.
+        threading.Timer(1.0, poweroff).start()
+
     # ── state summary ────────────────────────────────────────────────────────
 
     def _lookup_pose(self):
@@ -438,6 +727,11 @@ class DeckBridge(Node):
             'pose': self._lookup_pose(),
             'nearest': self._nearest,
             'map': map_state,
+            'camera': self._camera,
+            'gait': {'running': self._gait_running, 'armed': self._gait_running and self._armed},
+            # Forwarded disarmed too: by-hand IMU calibration runs then, and the
+            # mode message carries result notes ("IMU zeroed"). The Deck hides "walk".
+            'mode': self._mode if self._gait_running else None,
             'rates': self._rates,
             'depth_range_m': [round(self._depth_min_mm / 1000.0, 2), round(self._depth_max_mm / 1000.0, 2)],
             'sys': {'cpu_temp_c': self._read_cpu_temp_c(), 'load1': round(os.getloadavg()[0], 2)},
@@ -453,6 +747,7 @@ class DeckBridge(Node):
                            qos=0)
 
     def shutdown(self):
+        self.save_settings()
         self._publish_neutral_joy()
         if self._mqtt.is_connected():
             info = self._mqtt.publish(self._t['robot_online'], '0', qos=1, retain=True)

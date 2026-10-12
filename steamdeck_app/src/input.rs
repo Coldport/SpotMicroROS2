@@ -21,6 +21,8 @@ pub enum Action {
     NextView,
     /// Start / menu button: open or close the settings menu.
     ToggleMenu,
+    /// View (⧉) button: open or close the controls & tricks reference.
+    ToggleControls,
     Nav(Dir),
     /// A: toggle / cycle the selected setting.
     Confirm,
@@ -133,6 +135,7 @@ impl Gamepad {
                 }
                 match button {
                     Button::Start => Some(Action::ToggleMenu),
+                    Button::Back => Some(Action::ToggleControls),
                     Button::A => Some(Action::Confirm),
                     Button::X => Some(Action::Bluetooth),
                     b => dpad_dir(b).map(|d| {
@@ -240,6 +243,7 @@ mod tests {
         let mut pad = Gamepad::default();
         let down = |b| Event::ControllerButtonDown { timestamp: 0, which: 0, button: b };
         assert_eq!(pad.handle(&down(Button::Start)), Some(Action::ToggleMenu));
+        assert_eq!(pad.handle(&down(Button::Back)), Some(Action::ToggleControls));
         assert_eq!(pad.handle(&down(Button::DPadDown)), Some(Action::Nav(Dir::Down)));
         assert_eq!(pad.handle(&down(Button::A)), Some(Action::Confirm));
         assert!(pad.state.buttons[7] && pad.state.buttons[12], "still forwarded to the robot");

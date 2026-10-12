@@ -124,15 +124,25 @@ pub struct CalibInfo {
     #[serde(default)]
     pub note: String,
 }
-/// IMU axis calibration progress: step "level" | "right" | "left" | "return".
+/// IMU axis calibration progress: step "level" | "left" | "right" | "front" | "back" | "return".
 #[derive(Deserialize, Clone, Default, Debug)]
 pub struct ImuCalibInfo {
     pub step: String,
-    /// true: armed, the robot rolls itself; false: tilt it by hand.
+    /// true: armed, the robot tilts itself; false: tilt it by hand.
     #[serde(default)]
     pub auto: bool,
     #[serde(default)]
     pub prompt: String,
+    /// By hand only: current tilt from level (deg), the tilt needed, and how far
+    /// through the hold-still time (0..1); hint = what's missing.
+    #[serde(default)]
+    pub tilt: Option<f32>,
+    #[serde(default)]
+    pub need: Option<f32>,
+    #[serde(default)]
+    pub hold: Option<f32>,
+    #[serde(default)]
+    pub hint: String,
 }
 /// A result from gait_node to show once as a toast; `seq` goes up for each new one.
 #[derive(Deserialize, Clone, Default, Debug)]
@@ -310,7 +320,7 @@ mod tests {
         assert_eq!(c.offsets["FR"], [-5.0, 7.75, 6.0]);
 
         let st: RobotState = serde_json::from_str(
-            r#"{"mode":{"mode":"imu_calib","imu_calib":{"step":"right","auto":false,"prompt":"Tilt"},
+            r#"{"mode":{"mode":"imu_calib","imu_calib":{"step":"right","auto":false,"prompt":"Tilt","tilt":8.5,"need":12.0,"hold":0.0,"hint":"Tilt further"},
             "note":{"seq":3,"text":"IMU zeroed","ok":true}}}"#,
         )
         .unwrap();
