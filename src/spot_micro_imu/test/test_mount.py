@@ -82,10 +82,10 @@ def test_calibration_rejects_bad_poses():
         calibrate_mount(poses(heading, swap=('left', 'right')))
     with pytest.raises(ValueError, match='same axis'):
         ups = poses(heading)
-        calibrate_mount(ups | {'front': ups['right'], 'back': ups['left']})   # side tilts both times
+        calibrate_mount({**ups, 'front': ups['right'], 'back': ups['left']})   # side tilts both times
     with pytest.raises(ValueError, match='wrong way round'):
         ups = poses(heading)   # did the nose tilts when asked for the side ones and vice versa
-        calibrate_mount(ups | {'left': ups['back'], 'right': ups['front'], 'front': ups['right'], 'back': ups['left']})
+        calibrate_mount({**ups, 'left': ups['back'], 'right': ups['front'], 'front': ups['right'], 'back': ups['left']})
     with pytest.raises(ValueError, match='missing poses: back'):
         calibrate_mount({k: v for k, v in poses(heading).items() if k != 'back'})
 

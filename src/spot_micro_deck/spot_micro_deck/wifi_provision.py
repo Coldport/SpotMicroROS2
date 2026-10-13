@@ -288,9 +288,12 @@ def main():
         print(text, flush=True)
 
     agent = Agent(args.name, log)
-    srv = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+    # Bluetooth constants only exist when Python is built with BlueZ (true on the
+    # Pi, not on CI runners), hence the no-member disables.
+    srv = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM,  # pylint: disable=no-member
+                        socket.BTPROTO_RFCOMM)  # pylint: disable=no-member
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((socket.BDADDR_ANY, args.channel))
+    srv.bind((socket.BDADDR_ANY, args.channel))  # pylint: disable=no-member
     srv.listen(1)
     srv.settimeout(5.0)
     log(f'Wi-Fi provisioning: "{args.name}", RFCOMM channel {args.channel}, iface {args.iface}')
