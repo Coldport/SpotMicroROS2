@@ -94,7 +94,7 @@ def valid_credentials(ssid, psk):
 
 def _run(*cmd, timeout=30.0):
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, check=False, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 1, str(exc)
     return p.returncode, (p.stdout + p.stderr).strip()
@@ -138,7 +138,7 @@ def join_network(iface, ssid, psk, progress):
     """Add the network, switch to it and wait for an address. -> (ok, ip, text)."""
     old = ''
     if os.path.exists(NETPLAN_FILE):
-        with open(NETPLAN_FILE) as f:
+        with open(NETPLAN_FILE, encoding='utf-8') as f:
             old = f.read()
     try:
         _write_netplan(netplan_with_network(old, iface, ssid, psk))

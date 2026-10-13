@@ -1,0 +1,18 @@
+/**:
+    ros__parameters:
+      # Sentry object tracking (spot_micro_move/track_node.py). Pick a target on the
+      # Deck's camera view in sentry mode; gait_node turns the body to keep it centred
+      # (its track_gain / track_deadband_deg live in move_params.yaml).
+      color_topic: "/spotmicro_cam/d405/color/image_raw/compressed"
+      usb_color_topic: "/spotmicro_cam/usb/image_raw/compressed"
+      cmd_topic: "/spotmicro_track/cmd"
+      status_topic: "/spotmicro_track/status"
+      mode_topic: "/spotmicro_move/mode"
+      tracker: "csrt"           # csrt (robust) | kcf (faster) | mil
+      process_width: 320        # px the tracker works at
+      max_hz: 30.0              # the camera rate; CSRT manages ~50 fps at 320 px on the Pi 5
+      lost_timeout_s: 5.0       # give up after not seeing the target this long
+      # Camera field of view, [horizontal, vertical] deg. Only roughly needed: too
+      # small makes the body turn too little per step, too big overshoots.
+      fov_deg_realsense: [87.0, 58.0]
+      fov_deg_usb: [70.0, 43.0]

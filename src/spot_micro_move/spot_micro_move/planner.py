@@ -42,6 +42,7 @@ class CostMap:
         self.ox = origin_x
         self.oy = origin_y
         self.h, self.w = cost.shape
+        self.obstacle = None   # bool grid, set by build_costmap
 
     def cell(self, x, y):
         return int(math.floor((y - self.oy) / self.res)), int(math.floor((x - self.ox) / self.res))

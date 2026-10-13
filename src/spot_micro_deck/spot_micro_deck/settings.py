@@ -41,7 +41,7 @@ class Setting:
         return d
 
 
-def _f(key, label, group, lo, hi, step, unit='', help='', target='gait'):
+def _f(key, label, group, lo, hi, step, unit='', help='', target='gait'):  # pylint: disable=redefined-builtin
     return Setting(key, label, group, 'float', target, lo, hi, step, unit, help=help)
 
 
@@ -112,6 +112,10 @@ SETTINGS = [
             help='Re-encoding quality of the depth view (the color view is sent as the camera encodes it).'),
     _f('depth_min_m', 'Depth near', 'Video', 0.05, 1.0, 0.05, 'm', 'Warmest colour of the depth view.', 'bridge'),
     _f('depth_max_m', 'Depth far', 'Video', 0.3, 5.0, 0.1, 'm', 'Coolest colour of the depth view.', 'bridge'),
+    # ── Audio (this bridge) ──
+    Setting('audio_enabled', 'Robot mic', 'Audio', 'bool', 'bridge',
+            help='Play the robot camera\'s microphone on the Deck (about 130 kbit/s while on).'),
+    _f('audio_gain_db', 'Mic gain', 'Audio', 0.0, 30.0, 3.0, 'dB', 'Boost for a quiet mic.', 'bridge'),
     # ── Map ──
     Setting('clear_map', 'Clear map', 'Map', 'action', 'bridge',
             help='Wipes the SLAM map and starts a new one from where the robot stands. Press A twice.'),

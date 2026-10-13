@@ -78,8 +78,8 @@ class Bno055Node(Node):
         try:
             self._mount = mount.quat_normalize(
                 tuple(float(v) for v in self.get_parameter('mount_quaternion').value))
-        except (TypeError, ValueError):
-            raise ValueError('mount_quaternion must be 4 numbers [w, x, y, z], not all zero')
+        except (TypeError, ValueError) as exc:
+            raise ValueError('mount_quaternion must be 4 numbers [w, x, y, z], not all zero') from exc
         if len(self._mount) != 4:
             raise ValueError('mount_quaternion must be [w, x, y, z]')
         self._yaw0 = float(self.get_parameter('yaw_offset_deg').value)

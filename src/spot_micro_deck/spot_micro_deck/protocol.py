@@ -21,6 +21,10 @@ Robot -> Deck
                      then count * u16 range in millimetres (0xFFFF = no return).
                      Angles are in the robot base frame (the bridge applies the laser's
                      yaw from TF), counter-clockwise from +x = front.
+  <p>/audio          the robot's mic, while a Deck is online and the "Robot mic"
+                     setting (audio_enabled) is on: u8 codec (1 = G.711 mu-law,
+                     1 byte per sample, mono), u16 sample rate, u32 sequence
+                     number (gaps = lost chunks), then the samples (~40 ms each).
   <p>/state          JSON object, ~5 Hz (see DeckBridge._build_state). Includes
                      "camera" (which camera is plugged in / streaming) and
                      "gait" (gait_node running / armed) and, while armed,
@@ -94,6 +98,8 @@ AXIS_NAMES = ['left_x', 'left_y', 'right_x', 'right_y', 'l2', 'r2']
 
 _MAP_HEADER = struct.Struct('<HHfff')
 _SCAN_HEADER = struct.Struct('<fffH')
+_AUDIO_HEADER = struct.Struct('<BHI')
+AUDIO_MULAW = 1
 
 
 class ProtocolError(Exception):
@@ -109,6 +115,7 @@ def topics(prefix=DEFAULT_PREFIX):
         'map': f'{p}/map',
         'static_map': f'{p}/static_map',
         'scan': f'{p}/scan',
+        'audio': f'{p}/audio',
         'state': f'{p}/state',
         'settings': f'{p}/settings',
         'settings_ack': f'{p}/settings/ack',
@@ -137,6 +144,17 @@ def pack_scan(angle_min, angle_increment, range_max, ranges_mm_le):
     """ranges_mm_le: bytes of little-endian u16 millimetre ranges."""
     return _SCAN_HEADER.pack(angle_min, angle_increment, range_max,
                              len(ranges_mm_le) // 2) + ranges_mm_le
+
+
+def pack_audio(seq, rate, mulaw, codec=AUDIO_MULAW):
+    return _AUDIO_HEADER.pack(codec, rate, seq & 0xFFFFFFFF) + mulaw
+
+
+def unpack_audio(payload):
+    """-> (codec, rate, seq, samples)"""
+    if len(payload) < _AUDIO_HEADER.size:
+        raise ProtocolError('audio payload too short')
+    return _AUDIO_HEADER.unpack_from(payload) + (payload[_AUDIO_HEADER.size:],)
 
 
 def unpack_scan(payload):

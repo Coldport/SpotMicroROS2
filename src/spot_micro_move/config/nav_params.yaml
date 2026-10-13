@@ -1,0 +1,25 @@
+# nav_node (auto nav): plans on the SLAM map and walks the robot to a goal picked
+# on the Deck. See spot_micro_move/nav_node.py.
+nav_node:
+    ros__parameters:
+      map_frame: "map"
+      base_frame: "base_link"
+      replan_s: 3.0              # re-plan this often (the SLAM map keeps changing)
+      plan_resolution: 0.1       # m, planning grid cell (the SLAM map is 0.05)
+      robot_radius: 0.17         # m, walls grown by this are impassable
+      inflation_radius: 0.35     # m, paths prefer to stay this far from walls
+      allow_unknown: false       # true: plan through unexplored space too
+      goal_snap: 0.5             # m, a goal in/near a wall moves to free space within this
+      goal_tolerance: 0.15       # m, close enough counts as arrived
+      lookahead: 0.35            # m, steer toward the path point this far ahead
+      max_linear: 0.08           # m/s — the crawl gait tops out around 0.1 m/s
+      max_angular: 0.35          # rad/s
+      turn_in_place_deg: 20.0    # stop and turn on the spot when the path is this far off the nose...
+      align_deg: 6.0             # ...until the nose is within this of it, then walk straight
+      walk_turn_frac: 0.4        # steering while walking, as a fraction of max_angular
+      speed_levels: [0.25, 0.5, 0.75, 1.0, 1.25]   # Deck D-pad up/down; x max_linear / max_angular
+      speed_level: 3             # start at speed_levels[3] (100%)
+      stop_distance: 0.15        # m beyond the nose: stop for anything the lidar sees there
+      body_half_length: 0.18     # m, base_link -> nose; lidar returns inside the body are ignored
+      body_half_width: 0.09
+      blocked_timeout_s: 20.0    # give up if the way stays blocked this long

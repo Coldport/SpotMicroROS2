@@ -20,4 +20,5 @@ jobs:
         pip install pylint
     - name: Analysing the code with pylint
       run: |
-        pylint $(git ls-files '*.py')
+        # -z/-0: "Test _and_calib" has a space, which $(...) would split.
+        git ls-files -z '*.py' | xargs -0 pylint

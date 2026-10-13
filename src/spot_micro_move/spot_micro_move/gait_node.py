@@ -166,12 +166,13 @@ one is active — deck_bridge forwards it to the Deck):
   auto_nav   double-tap `nav_button` (default a) to enter or leave. The robot
              walks itself to a point picked on the Deck's map: nav_node
              (this package) plans the route and publishes `cmd_vel_topic`
-             (geometry_msgs/Twist: linear.x forward / linear.y left m/s,
-             angular.z turn-left rad/s), which this node turns into strides —
-             the inverse of the ODOMETRY estimate below, so `odom_scale`
-             calibrates both. cmd_vel older than `cmd_vel_timeout_s` counts as
-             stop. The left stick still drives by hand (no turning) and
-             overrides cmd_vel while pushed; the right stick, D-pad and L1/R1/
+             (geometry_msgs/Twist: linear.x forward m/s, angular.z turn-left
+             rad/s; linear.y is ignored, auto nav never walks sideways), which
+             this node turns into strides — the inverse of the ODOMETRY
+             estimate below, so `odom_scale` calibrates both. cmd_vel older
+             than `cmd_vel_timeout_s` counts as stop. The left stick still
+             drives by hand (up/down walks, left/right turns — no strafing)
+             and overrides cmd_vel while pushed; the right stick, D-pad and L1/R1/
              L2/R2 drive the Deck's map view, so height, sentry, tricks, IMU
              zero / calibration are off until you leave. `cmd_vel_turn_sign`
              flips the turn if the robot turns the wrong way for a +angular.z.
@@ -926,14 +927,16 @@ class GaitNode(Node):
         wz = _deadzone(joy.axes[_AX['right_x']], self._deadzone)    # turn = +
         scale = self._speed_scale
         if self._mode == 'auto_nav':
-            # The right stick moves the Deck's map cursor here, so it never turns the robot.
-            wz = 0.0
+            # The right stick moves the Deck's map cursor here, so it never turns
+            # the robot; the left stick's x turns instead of strafing. Auto nav
+            # never walks sideways: it turns to face the way it's going.
             manual = vx != 0.0 or vy != 0.0
+            wz, vy = vy, 0.0
             if manual != self._nav_manual:
                 self._nav_manual = manual
                 self._publish_mode()
             if not manual:
-                vx, vy, wz = self._cmd_vel_strides()
+                vx, _vy, wz = self._cmd_vel_strides()
                 scale = 1.0   # already in stride units
 
         walking = not self._needs_settle and (vx != 0.0 or vy != 0.0 or wz != 0.0)

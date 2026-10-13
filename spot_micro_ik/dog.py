@@ -27,9 +27,10 @@ class Dog:
         self.dry_run = dry_run
         self.driver = DryRunDriver(calibration) if dry_run else ServoDriver(calibration, frequency=pwm_hz)
 
-    def move_leg(self, leg_name, x, y, z, roll=0.0, pitch=0.0, yaw=0.0):
-        """Solve IK for one leg and write its servos. Returns the channel->angle dict sent."""
-        targets = self.legs[leg_name].solve(x, y, z, roll, pitch, yaw)
+    def move_leg(self, leg_name, x, y, z, roll=0.0, pitch=0.0, yaw=0.0, joint_angles=None):
+        """Solve IK for one leg and write its servos. Returns the channel->angle dict sent.
+        joint_angles: see Leg.solve (direct per-joint servo angles, e.g. for calibration)."""
+        targets = self.legs[leg_name].solve(x, y, z, roll, pitch, yaw, joint_angles)
         for channel, angle_deg in targets.items():
             self.driver.write(channel, angle_deg)
         return targets

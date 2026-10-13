@@ -47,11 +47,15 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profi
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 
+# Lambdas, not the functions themselves: some OpenCV builds lack a tracker, so
+# look it up only when that tracker is picked.
+# pylint: disable=unnecessary-lambda
 TRACKERS = {
     'csrt': lambda: cv2.TrackerCSRT_create(),
     'kcf': lambda: cv2.TrackerKCF_create(),
     'mil': lambda: cv2.TrackerMIL_create(),
 }
+# pylint: enable=unnecessary-lambda
 MIN_BOX_PX = 8
 
 

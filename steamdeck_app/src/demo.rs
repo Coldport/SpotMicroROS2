@@ -73,6 +73,7 @@ struct Demo {
     live: Arc<MapData>,
     path: Vec<[f32; 2]>,
     pose: (f32, f32, f32),
+    speed: f32,
     last: Instant,
 }
 
@@ -86,12 +87,13 @@ pub fn fill(shared: &SharedRef, _t: f32) {
         live: Arc::new(room(true)),
         path: vec![[0.0, 0.0], [0.4, 1.0], [2.5, 2.9], [4.0, 3.4], [5.6, 2.6]],
         pose: (0.0, 0.0, 0.3),
+        speed: 1.0,
         last: Instant::now(),
     });
     let dt = d.last.elapsed().as_secs_f32();
     d.last = Instant::now();
     // advance along the path
-    let mut step = 0.4 * dt;
+    let mut step = 0.4 * d.speed * dt;
     while step > 0.0 && d.path.len() >= 2 {
         let [tx, ty] = d.path[1];
         let (dx, dy) = (tx - d.pose.0, ty - d.pose.1);
@@ -136,6 +138,8 @@ pub fn fill(shared: &SharedRef, _t: f32) {
             text: if arrived { "Arrived".into() } else { format!("{left:.1} m to go") },
             goal: d.path.last().copied().filter(|_| !arrived),
             path: if arrived { vec![] } else { d.path.clone() },
+            speed: Some(d.speed),
+            speed_mps: Some(0.08 * d.speed),
         }),
         gait: Some(crate::shared::GaitInfo { running: true, armed: true }),
         ..Default::default()
@@ -147,5 +151,20 @@ pub fn fill(shared: &SharedRef, _t: f32) {
 pub fn set_goal(_shared: &SharedRef, x: f32, y: f32) {
     if let Some(d) = DEMO.lock().unwrap().as_mut() {
         d.path = vec![[d.pose.0, d.pose.1], [x, y]];
+    }
+}
+
+/// D-pad speed in the demo: the same levels as nav_node's default speed_levels.
+pub fn step_speed(step: i32) {
+    if let Some(d) = DEMO.lock().unwrap().as_mut() {
+        d.speed = (d.speed + 0.25 * step.signum() as f32).clamp(0.25, 1.25);
+    }
+}
+
+/// "The robot is here" in the demo: jump there and stop.
+pub fn set_pose(x: f32, y: f32, yaw: f32) {
+    if let Some(d) = DEMO.lock().unwrap().as_mut() {
+        d.pose = (x, y, yaw);
+        d.path.clear();
     }
 }

@@ -22,7 +22,7 @@ class MapLoadError(Exception):
 def load(yaml_path):
     """-> (width, height, resolution, origin_x, origin_y, cells int8 array, row 0 = lowest y)"""
     try:
-        with open(yaml_path) as f:
+        with open(yaml_path, encoding='utf-8') as f:
             meta = yaml.safe_load(f)
         image = meta['image']
         resolution = float(meta['resolution'])

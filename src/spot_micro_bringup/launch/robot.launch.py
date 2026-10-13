@@ -50,7 +50,7 @@ def _bridge_already_running():
     """
     try:
         return subprocess.run(['pgrep', '-f', 'spot_micro_deck/deck_bridge'],
-                              capture_output=True, timeout=5).returncode == 0
+                              capture_output=True, check=False, timeout=5).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 

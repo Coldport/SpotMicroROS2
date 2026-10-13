@@ -33,3 +33,9 @@
       depth_max_m: 2.0
       # Publish an all-zero Joy if the Deck is connected but silent this long.
       input_timeout_s: 0.5
+      # Robot mic -> Deck (the Anker webcam's mic). Needs the bridge's user in
+      # the "audio" group (systemd/spotmicro-deck.service adds it).
+      audio_enabled: false
+      audio_gain_db: 0.0
+      audio_device: "auto"       # or part of a card name ("C200"), or "plughw:0,0"
+      audio_rate: 16000          # Hz; 1 byte/sample on the wire (mu-law)

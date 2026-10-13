@@ -25,6 +25,8 @@ setup(
         'console_scripts': [
             'gait_node = spot_micro_move.gait_node:main',
             'scan_gate = spot_micro_move.scan_gate:main',
+            'nav_node = spot_micro_move.nav_node:main',
+            'track_node = spot_micro_move.track_node:main',
         ],
     },
 )

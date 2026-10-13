@@ -17,14 +17,21 @@ the lidar sees something within `stop_distance` ahead of its nose; it waits for
 it to clear (or the map to route round it) and gives up after
 `blocked_timeout_s`.
 
+It only walks forward and turns, never sideways: if the path bends more than
+`turn_in_place_deg` it stops, turns on the spot until it faces the path
+(within `align_deg`), then walks straight. The Deck's D-pad up/down steps the
+speed through `speed_levels` (fractions of max_linear / max_angular).
+
 Topics:
   goal_topic     geometry_msgs/PoseStamped  in   goal (map frame; orientation ignored)
   cancel_topic   std_msgs/Empty             in   stop and forget the goal
+  speed_topic    std_msgs/Int32             in   +1 / -1: next speed level up / down
   mode_topic     std_msgs/String (JSON)     in   gait_node's mode
   cmd_vel_topic  geometry_msgs/Twist        out  forward m/s, turn rad/s
   status_topic   std_msgs/String (JSON)     out  latched; deck_bridge shows it on the Deck:
                    {"state": idle|driving|blocked|arrived|failed, "text": "...",
-                    "goal": [x, y] | null, "path": [[x, y], ...], "left_m": float}
+                    "goal": [x, y] | null, "path": [[x, y], ...], "left_m": float,
+                    "speed": fraction, "speed_mps": m/s at that speed}
   path_topic     nav_msgs/Path              out  the current plan (for Foxglove)
 """
 
@@ -42,7 +49,7 @@ from rclpy.qos import (DurabilityPolicy, QoSProfile, ReliabilityPolicy,
                        qos_profile_sensor_data)
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Empty, String
+from std_msgs.msg import Empty, Int32, String
 
 from spot_micro_move import planner
 
@@ -64,6 +71,7 @@ class NavNode(Node):
         self.declare_parameter('cancel_topic', '/spotmicro_move/nav_cancel')
         self.declare_parameter('mode_topic', '/spotmicro_move/mode')
         self.declare_parameter('cmd_vel_topic', '/spotmicro_move/cmd_vel')
+        self.declare_parameter('speed_topic', '/spotmicro_move/nav_speed')
         self.declare_parameter('status_topic', '/spotmicro_move/nav_status')
         self.declare_parameter('path_topic', '/spotmicro_move/nav_path')
         self.declare_parameter('map_frame', 'map')
@@ -79,7 +87,11 @@ class NavNode(Node):
         self.declare_parameter('lookahead', 0.35)          # m, pure-pursuit carrot distance
         self.declare_parameter('max_linear', 0.08)         # m/s (the crawl walks ~0.1 m/s flat out)
         self.declare_parameter('max_angular', 0.35)        # rad/s
-        self.declare_parameter('turn_in_place_deg', 40.0)  # heading error above which it turns on the spot
+        self.declare_parameter('turn_in_place_deg', 20.0)  # heading error above which it turns on the spot
+        self.declare_parameter('align_deg', 6.0)           # ...and keeps turning until it's within this
+        self.declare_parameter('walk_turn_frac', 0.4)      # steering while walking, fraction of max_angular
+        self.declare_parameter('speed_levels', [0.25, 0.5, 0.75, 1.0, 1.25])  # D-pad steps through these
+        self.declare_parameter('speed_level', 3)           # starting index into speed_levels
         self.declare_parameter('stop_distance', 0.15)      # m beyond the nose: stop for obstacles
         self.declare_parameter('body_half_length', 0.18)   # m, base_link -> nose (lidar hits inside are the robot)
         self.declare_parameter('body_half_width', 0.09)
@@ -106,6 +118,8 @@ class NavNode(Node):
         self._scan = None          # (time, LaserScan)
         self._laser_yaw = None
         self._last_status = 0.0
+        self._speeds = sorted(float(v) for v in p('speed_levels') if float(v) > 0.0) or [1.0]
+        self._speed_i = min(max(int(p('speed_level')), 0), len(self._speeds) - 1)
 
         self._cmd_pub = self.create_publisher(Twist, p('cmd_vel_topic'), 10)
         self._status_pub = self.create_publisher(String, p('status_topic'), _LATCHED)
@@ -114,6 +128,7 @@ class NavNode(Node):
         self.create_subscription(LaserScan, p('scan_topic'), self._on_scan, qos_profile_sensor_data)
         self.create_subscription(PoseStamped, p('goal_topic'), self._on_goal, 10)
         self.create_subscription(Empty, p('cancel_topic'), self._on_cancel, 10)
+        self.create_subscription(Int32, p('speed_topic'), self._on_speed, 10)
         self.create_subscription(String, p('mode_topic'), self._on_mode, _LATCHED)
         self._tf = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf, self)
@@ -158,6 +173,17 @@ class NavNode(Node):
     def _on_cancel(self, _msg):
         if self._goal is not None:
             self._stop('idle', 'Stopped')
+
+    def _on_speed(self, msg):
+        step = (msg.data > 0) - (msg.data < 0)
+        self._speed_i = min(max(self._speed_i + step, 0), len(self._speeds) - 1)
+        if self._follower is not None:
+            self._follower.speed = self._speed()
+        self.get_logger().info(f'Nav speed {self._speed() * 100:.0f}%')
+        self._publish_status()
+
+    def _speed(self):
+        return self._speeds[self._speed_i]
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -227,7 +253,8 @@ class NavNode(Node):
             path = [[round(x, 2), round(y, 2)] for x, y in self._path]
         msg = {'state': self._state, 'text': self._text,
                'goal': [round(self._goal[0], 2), round(self._goal[1], 2)] if self._goal else None,
-               'path': path, 'left_m': round(self._left, 2)}
+               'path': path, 'left_m': round(self._left, 2), 'speed': round(self._speed(), 3),
+               'speed_mps': round(self._speed() * float(self._p('max_linear')), 3)}
         self._status_pub.publish(String(data=json.dumps(msg, separators=(',', ':'))))
         self._last_status = time.monotonic()
 
@@ -266,7 +293,8 @@ class NavNode(Node):
         self._follower = planner.Follower(
             path, lookahead=float(p('lookahead')), goal_tolerance=float(p('goal_tolerance')),
             max_linear=float(p('max_linear')), max_angular=float(p('max_angular')),
-            turn_in_place_deg=float(p('turn_in_place_deg')))
+            turn_in_place_deg=float(p('turn_in_place_deg')), align_deg=float(p('align_deg')),
+            walk_turn_frac=float(p('walk_turn_frac')), speed=self._speed())
         self._publish_path()
         return ''
 
@@ -328,7 +356,7 @@ def main(args=None):
         pass
     finally:
         try:
-            node._publish_cmd(0.0, 0.0)
+            node._publish_cmd(0.0, 0.0)  # pylint: disable=protected-access
         except Exception:   # noqa: BLE001 — shutting down anyway
             pass
         node.destroy_node()

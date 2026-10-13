@@ -49,9 +49,51 @@ def test_scan_round_trip():
     a0, inc, rmax, out = P.unpack_scan(P.pack_scan(-3.14, 0.01, 12.0, body))
     assert out == ranges
     assert a0 == pytest.approx(-3.14, abs=1e-5) and rmax == pytest.approx(12.0)
+    assert inc == pytest.approx(0.01, abs=1e-6)
 
 
 def test_scan_length_mismatch_rejected():
     payload = P.pack_scan(0.0, 0.1, 5.0, b'\x01\x00\x02\x00')[:-1]
     with pytest.raises(P.ProtocolError):
         P.unpack_scan(payload)
+
+
+def test_audio_round_trip():
+    payload = P.pack_audio(7, 16000, b'\x01\xff\x7f')
+    assert payload.hex() == '01803e07000000' + '01ff7f'    # pinned for protocol.rs
+    assert P.unpack_audio(payload) == (P.AUDIO_MULAW, 16000, 7, b'\x01\xff\x7f')
+    with pytest.raises(P.ProtocolError):
+        P.unpack_audio(b'\x01\x80')
+
+
+def test_nav_messages():
+    assert P.decode_nav('{"cmd":"goal","x":1.25,"y":-0.5}') == ('goal', 1.25, -0.5)
+    assert P.decode_nav('{"cmd":"cancel"}') == ('cancel',)
+    assert P.decode_nav('{"cmd":"speed","step":-1}') == ('speed', -1)
+    assert P.decode_nav('{"cmd":"pose","x":1.0,"y":-2,"yaw":1.5}') == ('pose', 1.0, -2.0, 1.5)
+
+
+@pytest.mark.parametrize('bad', [
+    'nope', '{"cmd":"goal","x":1}', '{"cmd":"goal","x":"a","y":0}',
+    '{"cmd":"goal","x":NaN,"y":0}', '{"cmd":"fly"}', '{}',
+    '{"cmd":"speed","step":3}', '{"cmd":"speed","step":true}', '{"cmd":"pose","x":0,"y":0}',
+    '{"cmd":"pose","x":0,"y":0,"yaw":Infinity}',
+])
+def test_bad_nav_rejected(bad):
+    with pytest.raises(P.ProtocolError):
+        P.decode_nav(bad)
+
+
+def test_decode_track():
+    assert P.decode_track('{"cmd":"stop"}') == ('stop',)
+    assert P.decode_track('{"cmd":"start","box":[0.1,0.2,0.3,0.4]}') == ('start', [0.1, 0.2, 0.3, 0.4])
+    for bad in ('{"cmd":"start","box":[0.1,0.2,0.3]}', '{"cmd":"start","box":[0.1,0.2,0,0.4]}',
+                '{"cmd":"start","box":[0.1,0.2,"NaN",0.4]}', '{"cmd":"go"}', 'nope'):
+        with pytest.raises(P.ProtocolError):
+            P.decode_track(bad)
+
+
+def test_track_topics():
+    t = P.topics('robo')
+    assert t['deck_track'] == 'robo/deck/track'
+    assert t['track'] == 'robo/track'

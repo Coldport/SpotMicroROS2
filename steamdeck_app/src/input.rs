@@ -28,6 +28,8 @@ pub enum Action {
     Confirm,
     /// X: set up Wi-Fi over Bluetooth (only acted on while there's no link).
     Bluetooth,
+    /// Y: in auto nav, start / cancel placing the robot on the map.
+    Place,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -138,6 +140,7 @@ impl Gamepad {
                     Button::Back => Some(Action::ToggleControls),
                     Button::A => Some(Action::Confirm),
                     Button::X => Some(Action::Bluetooth),
+                    Button::Y => Some(Action::Place),
                     b => dpad_dir(b).map(|d| {
                         self.repeat.press(d, Instant::now());
                         Action::Nav(d)

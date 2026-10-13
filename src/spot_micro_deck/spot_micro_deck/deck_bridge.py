@@ -22,6 +22,8 @@ The Deck has no ROS install, so it talks to the robot through a Mosquitto broker
     localization mode can load). static_map.* symlinks point at the newest save.
     "Load saved map" hands that pose graph back to slam_toolbox, so SLAM carries
     on from the saved map (the robot must start where that map was begun).
+  * The robot's mic (the Anker webcam's; audio.py): streamed as mu-law on
+    <prefix>/audio while a Deck is online and the "Robot mic" setting is on.
   * The saved static map goes to the Deck too (retained), for the auto-nav view.
   * Auto nav: goals / cancels / speed steps from the Deck go to nav_node
     (spot_micro_move), and its status comes back in the state message ("nav").
@@ -66,6 +68,7 @@ from geometry_msgs.msg import PoseStamped
 from slam_toolbox.srv import DeserializePoseGraph, Reset, SaveMap, SerializePoseGraph
 from std_msgs.msg import Bool, Empty, Int32, String
 
+from spot_micro_deck import audio
 from spot_micro_deck import param_file
 from spot_micro_deck import protocol as P
 from spot_micro_deck import settings as S
@@ -142,6 +145,12 @@ class DeckBridge(Node):
         self.declare_parameter('depth_min_m', 0.1)
         self.declare_parameter('depth_max_m', 2.0)
         self.declare_parameter('input_timeout_s', 0.5)
+        # Robot mic -> Deck (audio.py). audio_device: 'auto' (first USB mic, i.e.
+        # the webcam), part of a card's name, or an ALSA device like 'plughw:0,0'.
+        self.declare_parameter('audio_enabled', False)
+        self.declare_parameter('audio_gain_db', 0.0)
+        self.declare_parameter('audio_device', 'auto')
+        self.declare_parameter('audio_rate', 16000)
         # ':'-separated params files to write accepted Deck setting changes into
         # (deck.launch.py fills these in); empty = changes last until restart.
         self.declare_parameter('gait_params_files', '')
@@ -258,6 +267,12 @@ class DeckBridge(Node):
             String, p('mode_topic').value, self._on_mode,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                        reliability=ReliabilityPolicy.RELIABLE))
+
+        self._mic = None               # audio.MicStream while streaming
+        self._mic_exit = None          # why ffmpeg stopped by itself (set from its thread)
+        self._mic_retry_at = 0.0
+        self._mic_reported = ''        # last mic problem told to the Deck (once per try)
+        self._audio_seq = 0
 
         self._connected_pub.publish(Bool(data=False))
         self._setup_mqtt()
@@ -427,6 +442,7 @@ class DeckBridge(Node):
 
     def _reconcile_subscriptions(self):
         active = self._deck_active()
+        self._reconcile_mic(active)
         with self._lock:
             view = self._view
         wanted = {
@@ -447,6 +463,59 @@ class DeckBridge(Node):
                 self._subs[name] = factories[name]()
             elif not want and name in self._subs:
                 self.destroy_subscription(self._subs.pop(name))
+
+    def _reconcile_mic(self, active):
+        """Run the mic while a Deck is online and wants it; restart it when the
+        gain changes; after a failure, retry every few seconds (telling the
+        Deck why once, not every time)."""
+        want = active and bool(self.get_parameter('audio_enabled').value)
+        gain = float(self.get_parameter('audio_gain_db').value)
+        now = time.monotonic()
+        with self._lock:
+            exited, self._mic_exit = self._mic_exit, None
+        if exited and self._mic is not None:
+            self._mic = None
+            self._mic_failed(exited, now)
+        if self._mic is not None and (not want or self._mic.gain_db != gain):
+            self._mic.stop()
+            self._mic = None
+            if not want:
+                self.get_logger().info('Robot mic off.')
+        if not want:
+            self._mic_reported = ''
+            self._mic_retry_at = 0.0
+            return
+        if self._mic is not None or now < self._mic_retry_at:
+            return
+        try:
+            device = audio.find_device(self.get_parameter('audio_device').value)
+            audio.check_access(device)
+            mic = audio.MicStream(device, self._on_mic_chunk, self._on_mic_exit,
+                                  rate=int(self.get_parameter('audio_rate').value), gain_db=gain)
+            mic.start()
+        except audio.AudioError as exc:
+            self._mic_failed(str(exc), now)
+            return
+        self._mic = mic
+        self.get_logger().info(f'Robot mic on: {device}, {mic.rate} Hz mu-law, gain {gain:g} dB.')
+
+    def _mic_failed(self, reason, now):
+        self._mic_retry_at = now + 5.0
+        if reason != self._mic_reported:
+            self._mic_reported = reason
+            self.get_logger().warn(f'Robot mic: {reason}')
+            self._ack('audio_enabled', False, True, reason)
+
+    def _on_mic_chunk(self, data):
+        # From the mic's reader thread; paho's publish is thread-safe.
+        mic = self._mic
+        rate = mic.rate if mic is not None else 16000
+        self._audio_seq += 1
+        self._mqtt.publish(self._t['audio'], P.pack_audio(self._audio_seq, rate, data), qos=0)
+
+    def _on_mic_exit(self, reason):
+        with self._lock:
+            self._mic_exit = reason
 
     # ── ROS -> MQTT ──────────────────────────────────────────────────────────
 
@@ -763,7 +832,7 @@ class DeckBridge(Node):
 
         def poweroff():
             try:
-                result = subprocess.run(_SHUTDOWN_CMD, capture_output=True, text=True, timeout=15)
+                result = subprocess.run(_SHUTDOWN_CMD, capture_output=True, check=False, text=True, timeout=15)
                 err = result.stderr.strip() if result.returncode else ''
             except (OSError, subprocess.SubprocessError) as exc:
                 err = str(exc)
@@ -925,7 +994,7 @@ class DeckBridge(Node):
     @staticmethod
     def _read_cpu_temp_c():
         try:
-            with open('/sys/class/thermal/thermal_zone0/temp') as f:
+            with open('/sys/class/thermal/thermal_zone0/temp', encoding='utf-8') as f:
                 return round(int(f.read().strip()) / 1000.0, 1)
         except (OSError, ValueError):
             return None
@@ -976,6 +1045,8 @@ class DeckBridge(Node):
                            qos=0)
 
     def shutdown(self):
+        if self._mic is not None:
+            self._mic.stop()
         self.save_settings()
         self._publish_neutral_joy()
         if self._mqtt.is_connected():

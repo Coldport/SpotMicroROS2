@@ -1,4 +1,3 @@
-import pytest
 
 from spot_micro_deck import param_file as F
 from spot_micro_deck import settings as S
@@ -51,7 +50,7 @@ def test_every_setting_is_in_the_real_params_files():
     files = {'gait': 'spot_micro_move/config/move_params.yaml',
              'bridge': 'spot_micro_deck/config/deck_params.yaml'}
     for target, rel in files.items():
-        with open(os.path.join(root, rel)) as f:
+        with open(os.path.join(root, rel), encoding='utf-8') as f:
             text = f.read()
         params = yaml.safe_load(text)['/**']['ros__parameters']
         for s in S.SETTINGS:

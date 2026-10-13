@@ -8,14 +8,17 @@
 //!                 leaves auto nav on the robot, and must not set a goal too)
 //!   tap screen    walk to that point straight away
 //!   X             stop (cancel the goal)
+//!   Y             place the robot ("it's here"): A / tap where it stands,
+//!                 then A / tap the way it faces. Y or X again cancels.
+//!   D-pad up/down speed up / down
+//!   D-pad l/r     re-centre on the robot and follow it again
 //!   L1 / R1       rotate the map (hold)
 //!   L2 / R2       zoom out / in (analog)
-//!   D-pad down    re-centre on the robot and follow it again
 
 use std::time::{Duration, Instant};
 
-use crate::input::InputState;
-use crate::protocol::{BTN_DPAD_DOWN, BTN_L1, BTN_R1};
+use crate::input::{Dir, InputState};
+use crate::protocol::{BTN_DPAD_LEFT, BTN_DPAD_RIGHT, BTN_L1, BTN_R1};
 
 /// Screen area the map fills: everything below the top bar (logical pixels).
 pub const AREA_TOP: f32 = 56.0;
@@ -31,6 +34,17 @@ const ZOOM_RATE: f32 = 1.6; // e-folds per second at full trigger
 const ROTATE_RATE: f32 = 1.6; // rad/s while L1/R1 held
 const CURSOR_SPEED: f32 = 700.0; // px/s at full stick
 const EDGE: f32 = 24.0; // cursor margin before panning
+/// Placing the robot: the facing point must be at least this far from the spot (px).
+pub const MIN_AIM_PX: f32 = 24.0;
+
+/// Placing the robot on the map: first where it stands, then which way it faces.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Place {
+    /// Moving the cursor to where the robot stands.
+    Spot,
+    /// Standing here (map frame, m); the cursor shows which way it faces.
+    Facing(f32, f32),
+}
 
 #[derive(Clone, Debug)]
 pub struct NavCam {
@@ -44,13 +58,15 @@ pub struct NavCam {
     pub cursor: (f32, f32),
     /// Keep the robot in the centre (until the view is panned by hand).
     pub follow: bool,
+    /// Some while placing the robot (Y).
+    pub place: Option<Place>,
     pending_a: Option<Instant>,
 }
 
 impl Default for NavCam {
     fn default() -> Self {
         let (cx, cy) = Self::screen_centre();
-        NavCam { centre: (0.0, 0.0), zoom: 90.0, rot: 0.0, cursor: (cx, cy), follow: true, pending_a: None }
+        NavCam { centre: (0.0, 0.0), zoom: 90.0, rot: 0.0, cursor: (cx, cy), follow: true, place: None, pending_a: None }
     }
 }
 
@@ -59,6 +75,10 @@ impl Default for NavCam {
 pub enum NavCmd {
     Goal(f32, f32),
     Cancel,
+    /// One speed level up (+1) or down (-1).
+    Speed(i32),
+    /// The robot is at (x, y) facing yaw (map frame, rad CCW from +x).
+    Pose(f32, f32, f32),
 }
 
 impl NavCam {
@@ -108,7 +128,7 @@ impl NavCam {
                 self.centre.1 += before.1 - after.1;
             }
         }
-        if b[BTN_DPAD_DOWN] {
+        if b[BTN_DPAD_LEFT] || b[BTN_DPAD_RIGHT] {
             self.follow = true;
             let (cx, cy) = Self::screen_centre();
             self.cursor = (cx, cy);
@@ -158,14 +178,14 @@ impl NavCam {
         self.pending_a.is_some()
     }
 
-    /// Screen tap (or click): move the cursor there and go.
+    /// Screen tap (or click): move the cursor there and act on it straight away.
     pub fn tap(&mut self, sx: f32, sy: f32) -> Option<NavCmd> {
         if sy < AREA_TOP {
             return None;
         }
         self.cursor = (sx, sy);
-        let (x, y) = self.screen_to_world(sx, sy);
-        Some(NavCmd::Goal(x, y))
+        self.pending_a = None;
+        self.confirm()
     }
 
     pub fn poll(&mut self, now: Instant) -> Option<NavCmd> {
@@ -174,13 +194,66 @@ impl NavCam {
             return None;
         }
         self.pending_a = None;
-        let (x, y) = self.screen_to_world(self.cursor.0, self.cursor.1);
-        Some(NavCmd::Goal(x, y))
+        self.confirm()
     }
 
-    /// Leaving auto nav: drop a half-finished A.
+    /// A (or a tap) at the cursor: a goal, or the next step of placing the robot.
+    fn confirm(&mut self) -> Option<NavCmd> {
+        let (x, y) = self.screen_to_world(self.cursor.0, self.cursor.1);
+        match self.place {
+            None => Some(NavCmd::Goal(x, y)),
+            Some(Place::Spot) => {
+                self.place = Some(Place::Facing(x, y));
+                None
+            }
+            Some(Place::Facing(px, py)) => {
+                let yaw = self.facing()?.2;
+                self.place = None;
+                Some(NavCmd::Pose(px, py, yaw))
+            }
+        }
+    }
+
+    /// While choosing which way the placed robot faces: (x, y, yaw toward the
+    /// cursor), or None if the cursor is still on the spot.
+    pub fn facing(&self) -> Option<(f32, f32, f32)> {
+        let Some(Place::Facing(px, py)) = self.place else { return None };
+        let (sx, sy) = self.world_to_screen(px, py);
+        if (self.cursor.0 - sx).hypot(self.cursor.1 - sy) < MIN_AIM_PX {
+            return None;
+        }
+        let (cx, cy) = self.screen_to_world(self.cursor.0, self.cursor.1);
+        Some((px, py, (cy - py).atan2(cx - px)))
+    }
+
+    /// Y: start placing the robot, or give up on it.
+    pub fn toggle_place(&mut self) {
+        self.place = if self.place.is_some() { None } else { Some(Place::Spot) };
+        self.pending_a = None;
+    }
+
+    /// X: cancels placing the robot if that's under way, otherwise stops it.
+    pub fn press_x(&mut self) -> Option<NavCmd> {
+        if self.place.take().is_some() {
+            self.pending_a = None;
+            return None;
+        }
+        Some(NavCmd::Cancel)
+    }
+
+    /// D-pad up / down: speed.
+    pub fn dpad(&self, d: Dir) -> Option<NavCmd> {
+        match d {
+            Dir::Up => Some(NavCmd::Speed(1)),
+            Dir::Down => Some(NavCmd::Speed(-1)),
+            _ => None,
+        }
+    }
+
+    /// Leaving auto nav: drop a half-finished A or placement.
     pub fn reset_pending(&mut self) {
         self.pending_a = None;
+        self.place = None;
     }
 }
 
@@ -264,7 +337,7 @@ mod tests {
         assert!(cam.cursor.0 <= SCREEN_W - EDGE + 1e-3);
         assert!(!cam.follow && cam.centre.0 > 0.5, "map slid right-to-left: centre moved +x");
         input.axes[2] = 0.0;
-        input.buttons[BTN_DPAD_DOWN] = true; // re-centre
+        input.buttons[BTN_DPAD_LEFT] = true; // re-centre
         cam.update(0.1, &input, Some((2.0, 3.0)));
         assert!(cam.follow && close(cam.centre, (2.0, 3.0)));
     }
@@ -278,5 +351,51 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(cam.tap(100.0, 10.0), None, "top bar isn't the map");
+    }
+
+    #[test]
+    fn placing_the_robot_takes_a_spot_then_a_heading() {
+        let t0 = Instant::now();
+        let mut cam = NavCam { centre: (1.0, 1.0), ..Default::default() };
+        cam.toggle_place();
+        let spot = cam.world_to_screen(2.0, 1.0);
+        assert_eq!(cam.tap(spot.0, spot.1), None, "first the spot");
+        assert!(matches!(cam.place, Some(Place::Facing(x, y)) if close((x, y), (2.0, 1.0))));
+        // A on the spot itself: no heading yet, still placing.
+        cam.press_a(t0);
+        assert_eq!(cam.poll(t0 + Duration::from_millis(500)), None);
+        assert!(cam.place.is_some());
+        // Cursor north of the spot (map +y): facing +90°.
+        let north = cam.world_to_screen(2.0, 2.0);
+        cam.cursor = north;
+        cam.press_a(t0 + Duration::from_secs(1));
+        match cam.poll(t0 + Duration::from_millis(1500)) {
+            Some(NavCmd::Pose(x, y, yaw)) => {
+                assert!(close((x, y), (2.0, 1.0)));
+                assert!((yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-3);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(cam.place, None, "done");
+    }
+
+    #[test]
+    fn x_cancels_placing_before_it_stops_the_robot() {
+        let mut cam = NavCam::default();
+        cam.toggle_place();
+        assert_eq!(cam.press_x(), None);
+        assert_eq!(cam.place, None);
+        assert_eq!(cam.press_x(), Some(NavCmd::Cancel));
+        cam.toggle_place();
+        cam.toggle_place(); // Y twice: cancelled
+        assert_eq!(cam.place, None);
+    }
+
+    #[test]
+    fn dpad_up_down_is_speed() {
+        let cam = NavCam::default();
+        assert_eq!(cam.dpad(Dir::Up), Some(NavCmd::Speed(1)));
+        assert_eq!(cam.dpad(Dir::Down), Some(NavCmd::Speed(-1)));
+        assert_eq!(cam.dpad(Dir::Left), None);
     }
 }

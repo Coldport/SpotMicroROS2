@@ -83,7 +83,7 @@ def update_text(text, values):
 def update_file(path, values):
     """Set `values` in the params file at `path` (atomically; symlinks followed)."""
     path = os.path.realpath(path)
-    with open(path) as f:
+    with open(path, encoding='utf-8') as f:
         text = f.read()
     new_text = update_text(text, values)
     if new_text == text:

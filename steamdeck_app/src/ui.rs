@@ -17,7 +17,7 @@ use sdl2::video::{Window, WindowContext};
 use crate::bt::Provision;
 use crate::input::InputState;
 use crate::menu::{format_value, fraction, Menu};
-use crate::navview::NavCam;
+use crate::navview::{NavCam, Place};
 use crate::protocol::{MapData, ScanData, BUTTON_NAMES};
 use crate::shared::{CameraInfo, Frame, ModeInfo, RobotState, SettingItem, TrackStatus, View};
 use crate::track::{self, TrackPick};
@@ -63,6 +63,8 @@ pub struct Snapshot {
     pub nav_cam: Option<NavCam>,
     /// A single A is waiting to become a goal.
     pub nav_a_pending: bool,
+    /// The robot's mic is coming in (and playing).
+    pub audio_live: bool,
     /// Sentry object tracking status from the robot (fresh only).
     pub track: Option<TrackStatus>,
     /// Some while a tracking target can be picked (sentry, camera view).
@@ -119,6 +121,7 @@ const NAV_PATH: Color = Color::RGB(21, 101, 192);
 const NAV_GOAL: Color = Color::RGB(22, 163, 74);
 const NAV_CURSOR: Color = Color::RGB(219, 39, 119);
 const NAV_ROBOT: Color = Color::RGB(234, 88, 12);
+const NAV_PLACE: Color = Color::RGB(124, 58, 237);
 
 /// Lidar dots by range, picked to read on the paper background:
 /// red (near) -> orange -> teal -> blue (far).
@@ -273,7 +276,7 @@ impl Ui {
             } else if menu.controls_open {
                 self.draw_controls_help(canvas);
             } else {
-                self.draw_nav_panel(canvas, snap);
+                self.draw_nav_panel(canvas, snap, cam);
             }
             if !menu.controls_open {
                 self.draw_overlay(canvas, snap, menu.open, true);
@@ -794,9 +797,28 @@ impl Ui {
             }
         }
 
-        // Cursor: crosshair, with where it is and how far from the robot.
+        // Placing the robot: the chosen spot, and the way it faces (toward the cursor).
         let (cx, cy) = cam.cursor;
-        let col = if snap.nav_a_pending { NAV_GOAL } else { NAV_CURSOR };
+        if let Some(Place::Facing(px, py)) = cam.place {
+            let (sx, sy) = cam.world_to_screen(px, py);
+            self.circle(canvas, sx as i32, sy as i32, 18, with_alpha(NAV_PLACE, 60), false);
+            match cam.facing() {
+                Some((_, _, yaw)) => {
+                    self.thick_line(canvas, (sx, sy), (cx, cy), 2.0, with_alpha(NAV_PLACE, 160));
+                    self.robot_marker_color(canvas, sx, sy, yaw + cam.rot, 12.0, NAV_PLACE);
+                }
+                None => self.circle(canvas, sx as i32, sy as i32, 8, NAV_PLACE, false),
+            }
+        }
+
+        // Cursor: crosshair, with where it is and how far from the robot.
+        let col = if cam.place.is_some() {
+            NAV_PLACE
+        } else if snap.nav_a_pending {
+            NAV_GOAL
+        } else {
+            NAV_CURSOR
+        };
         self.circle(canvas, cx as i32, cy as i32, 14, col, true);
         for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
             self.thick_line(canvas, (cx + dx * 8.0, cy + dy * 8.0), (cx + dx * 22.0, cy + dy * 22.0), 2.0, col);
@@ -806,8 +828,12 @@ impl Ui {
         if let Some(p) = &pose {
             label = format!("{label}  ·  {:.1} m away", ((wx - p.x).powi(2) + (wy - p.y).powi(2)).sqrt());
         }
-        if snap.nav_a_pending {
-            label = "Going here…".to_string();
+        match (cam.place, cam.facing()) {
+            (Some(Place::Spot), _) => label = format!("Robot here?  {wx:.1}, {wy:.1} m"),
+            (Some(Place::Facing(..)), Some((_, _, yaw))) => label = format!("Facing {:.0}°", yaw.to_degrees()),
+            (Some(Place::Facing(..)), None) => label = "Move the cursor the way it faces".to_string(),
+            (None, _) if snap.nav_a_pending => label = "Going here…".to_string(),
+            _ => {}
         }
         let tw = self.font.width(&label, Weight::Bold, 13) + 16;
         let (lx, ly) = ((cx as i32 + 20).min(LOGICAL_W as i32 - tw - 8), cy as i32 + 18);
@@ -864,14 +890,20 @@ impl Ui {
     }
 
     /// Bottom card in auto nav: what the planner is doing, the legend and the controls.
-    fn draw_nav_panel(&mut self, canvas: &mut Canvas<Window>, snap: &Snapshot) {
+    fn draw_nav_panel(&mut self, canvas: &mut Canvas<Window>, snap: &Snapshot, cam: &NavCam) {
         let h = 108;
         let r = Rect::new(M, LOGICAL_H as i32 - M - h, LOGICAL_W - 2 * M as u32, h as u32);
         self.card(canvas, r, "Auto nav");
         let st = snap.fresh_state();
         let nav = st.and_then(|s| s.nav.clone()).unwrap_or_default();
         let manual = st.and_then(|s| s.mode.as_ref()).map(|m| m.manual).unwrap_or(false);
-        let (text, color) = if manual {
+        let (text, color) = if let Some(place) = cam.place {
+            let step = match place {
+                Place::Spot => "Where is the robot? Move the cursor there, A or tap",
+                Place::Facing(..) => "Which way does it face? Point the cursor, A or tap",
+            };
+            (step.to_string(), NAV_PLACE)
+        } else if manual {
             ("Manual — the left stick is driving".to_string(), WARN)
         } else {
             match nav.state.as_str() {
@@ -885,6 +917,16 @@ impl Ui {
         };
         let text = self.font.fit(&text, Weight::Bold, 18, r.width() as i32 / 2);
         self.text(canvas, &text, r.x() + 16, r.y() + 34, Weight::Bold, 18, color);
+
+        // Speed (D-pad up/down), next to the card title.
+        if let Some(speed) = nav.speed {
+            let mut label = format!("Speed {:.0}%", speed * 100.0);
+            if let Some(mps) = nav.speed_mps {
+                label = format!("{label} · {:.0} cm/s", mps * 100.0);
+            }
+            let tx = r.x() + 16 + self.font.width("Auto nav", Weight::Bold, 14) + 16;
+            self.text(canvas, &label, tx, r.y() + 12, Weight::Bold, 13, ACCENT);
+        }
 
         // Legend, right.
         let mut x = r.right() - 16;
@@ -914,8 +956,13 @@ impl Ui {
 
         let mut x = r.x() + 16;
         let y = r.bottom() - 36;
-        for (k, l) in [("R-stick", "Cursor"), ("A", "Go"), ("X", "Stop"), ("L1/R1", "Rotate"), ("L2/R2", "Zoom"), ("↓", "Re-centre"), ("A×2", "Exit"), ("B", "Go limp")] {
-            x += self.keycap(canvas, k, l, x, y) + 16;
+        let keys: &[(&str, &str)] = if cam.place.is_some() {
+            &[("R-stick", "Cursor"), ("A", "Set"), ("Y / X", "Cancel"), ("L1/R1", "Rotate"), ("L2/R2", "Zoom"), ("←/→", "Re-centre")]
+        } else {
+            &[("R-stick", "Cursor"), ("A", "Go"), ("X", "Stop"), ("Y", "Robot is here"), ("↑/↓", "Speed"), ("L1/R1", "Rotate"), ("L2/R2", "Zoom"), ("←/→", "Re-centre"), ("A×2", "Exit"), ("B", "Go limp")]
+        };
+        for (k, l) in keys {
+            x += self.keycap(canvas, k, l, x, y) + 12;
         }
     }
 
@@ -967,6 +1014,9 @@ impl Ui {
             Some("imu_calib") => right = self.pill(canvas, right, "IMU CAL", ON_ACCENT, WARN, ON_ACCENT) - 8,
             Some("auto_nav") => right = self.pill(canvas, right, "AUTO NAV", ON_ACCENT, GOOD, ON_ACCENT) - 8,
             _ => {}
+        }
+        if snap.audio_live {
+            right = self.pill(canvas, right, "Mic", ACCENT, SURFACE, TEXT) - 8;
         }
 
         if let Some(cam) = snap.camera().cloned() {
@@ -1590,7 +1640,9 @@ impl Ui {
                     ("A ×2", "Auto nav on / off", "the screen becomes a map"),
                     ("A / tap", "Walk to the cursor / the spot", "R stick moves the cursor"),
                     ("X", "Stop walking there", ""),
-                    ("L1/R1 L2/R2", "Rotate / zoom the map", "↓ re-centres on the robot"),
+                    ("Y", "Set where the robot is", "A/tap its spot, then the way it faces"),
+                    ("↑ / ↓", "Faster / slower", ""),
+                    ("L1/R1 L2/R2", "Rotate / zoom the map", "← / → re-centres on the robot"),
                 ]),
             ],
             &[

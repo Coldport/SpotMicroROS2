@@ -76,7 +76,7 @@ Back Left:
     channel: 0
     angle: 90
     range: 270
-    offset: 7.9
+    offset: 3.9
   Thigh:
     channel: 1
     angle: 60

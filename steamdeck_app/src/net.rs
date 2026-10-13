@@ -55,6 +55,20 @@ impl Commander {
             .is_ok()
     }
 
+    /// Auto nav: one speed level up (+1) or down (-1).
+    pub fn nav_speed(&self, step: i32) -> bool {
+        self.client
+            .try_publish(&self.topics.deck_nav, QoS::AtLeastOnce, false, protocol::encode_nav_speed(step))
+            .is_ok()
+    }
+
+    /// Auto nav: the robot is here (map frame); the result comes back as a "set_pose" ack.
+    pub fn nav_pose(&self, x: f32, y: f32, yaw: f32) -> bool {
+        self.client
+            .try_publish(&self.topics.deck_nav, QoS::AtLeastOnce, false, protocol::encode_nav_pose(x, y, yaw))
+            .is_ok()
+    }
+
     /// Sentry: track what's in this normalised camera-image box.
     pub fn track_start(&self, b: [f32; 4]) -> bool {
         self.client
@@ -178,6 +192,7 @@ pub fn start(
                     let _ = client.try_subscribe(&topics.settings, QoS::AtMostOnce);
                     let _ = client.try_subscribe(&topics.settings_ack, QoS::AtLeastOnce);
                     let _ = client.try_subscribe(&topics.track, QoS::AtMostOnce);
+                    let _ = client.try_subscribe(&topics.audio, QoS::AtMostOnce);
                 }
                 Ok(Event::Incoming(Packet::Publish(p))) => {
                     dispatch(&topics, &p.topic, &p.payload, &shared, &slot);
@@ -254,6 +269,19 @@ fn dispatch(topics: &Topics, topic: &str, payload: &[u8], shared: &SharedRef, sl
                 s.settings_at = Some(Instant::now());
             }
             Err(e) => shared.lock().unwrap().last_error = format!("settings: {e}"),
+        }
+    } else if topic == topics.audio {
+        if let Ok((protocol::AUDIO_MULAW, rate, _seq, bytes)) = protocol::parse_audio(payload) {
+            let mut s = shared.lock().unwrap();
+            s.audio_rate = rate as u32;
+            s.audio_at = Some(Instant::now());
+            s.audio.extend(bytes.iter().map(|&b| crate::audio::mulaw_to_i16(b)));
+            // The UI thread drains this every frame; if it stalls, keep the newest second.
+            let cap = rate as usize;
+            if s.audio.len() > cap {
+                let extra = s.audio.len() - cap;
+                s.audio.drain(..extra);
+            }
         }
     } else if topic == topics.settings_ack {
         if let Ok(ack) = serde_json::from_slice::<SettingAck>(payload) {

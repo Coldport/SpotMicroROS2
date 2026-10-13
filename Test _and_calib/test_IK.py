@@ -450,10 +450,10 @@ def main():
 
     try:
         while True:
-            '''leg1.release_servos()
-            leg2.release_servos()
-            leg3.release_servos()
-            leg4.release_servos()'''
+            # leg1.release_servos()
+            # leg2.release_servos()
+            # leg3.release_servos()
+            # leg4.release_servos()
 
             # 1. start_pose → end_pose
             trajectory = leg1.create_points(start_pose, end_pose, steps)
@@ -473,10 +473,10 @@ def main():
                 leg4.Move_To_L(point)
                 time.sleep(0.051)
 
-            '''leg1.release_servos()
-            leg2.release_servos()
-            leg3.release_servos()
-            leg4.release_servos()'''
+            # leg1.release_servos()
+            # leg2.release_servos()
+            # leg3.release_servos()
+            # leg4.release_servos()
 
 
     except KeyboardInterrupt:

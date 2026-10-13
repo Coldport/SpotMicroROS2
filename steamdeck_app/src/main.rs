@@ -8,6 +8,7 @@
 //!                       [--prefix TOPIC_PREFIX] [--windowed] [--menu] [--controls]
 //! The host can also come from $SPOTDECK_HOST or ~/.config/spotmicro-deck/host.
 
+mod audio;
 mod bt;
 mod demo;
 mod input;
@@ -201,6 +202,7 @@ fn run() -> Result<(), String> {
     let sdl = sdl2::init()?;
     let video = sdl.video()?;
     let game_controller = sdl.game_controller()?;
+    let mut player = audio::Player::new(sdl.audio().ok());
     let mut pump = sdl.event_pump()?;
     sdl.mouse().show_cursor(false);
 
@@ -336,6 +338,7 @@ fn run() -> Result<(), String> {
                     Keycode::Right => actions.push(Action::Nav(Dir::Right)),
                     Keycode::Return => actions.push(Action::Confirm),
                     Keycode::B => actions.push(Action::Bluetooth),
+                    Keycode::P => actions.push(Action::Place),
                     _ => {}
                 },
                 // Touchscreen taps arrive as (synthesised) left clicks, in logical pixels.
@@ -429,7 +432,15 @@ fn run() -> Result<(), String> {
                     None
                 }
                 Action::Bluetooth if auto_nav && !menu.open => {
-                    nav_cmds.push(NavCmd::Cancel);
+                    nav_cmds.extend(nav.press_x());
+                    None
+                }
+                Action::Place if auto_nav && !menu.open => {
+                    nav.toggle_place();
+                    None
+                }
+                Action::Nav(d) if auto_nav && !menu.open => {
+                    nav_cmds.extend(nav.dpad(d));
                     None
                 }
                 Action::Nav(d) if picking => {
@@ -479,14 +490,22 @@ fn run() -> Result<(), String> {
             let (sent, what) = match cmd {
                 NavCmd::Goal(x, y) => (commander.nav_goal(x, y), format!("Walking to {x:.1}, {y:.1} m")),
                 NavCmd::Cancel => (commander.nav_cancel(), "Stopping".to_string()),
+                // The new speed shows in the nav panel once the robot has it.
+                NavCmd::Speed(step) => (commander.nav_speed(step), String::new()),
+                NavCmd::Pose(x, y, yaw) => (commander.nav_pose(x, y, yaw), "Placing the robot…".to_string()),
             };
             if args.demo_nav {
-                if let NavCmd::Goal(x, y) = cmd {
-                    demo::set_goal(&shared, x, y);
+                match cmd {
+                    NavCmd::Goal(x, y) => demo::set_goal(&shared, x, y),
+                    NavCmd::Speed(step) => demo::step_speed(step),
+                    NavCmd::Pose(x, y, yaw) => demo::set_pose(x, y, yaw),
+                    NavCmd::Cancel => {}
                 }
             }
             if sent || args.demo_nav {
-                menu.notify(what, true);
+                if !what.is_empty() {
+                    menu.notify(what, true);
+                }
             } else {
                 menu.notify("Not connected — not sent".into(), false);
             }
@@ -516,7 +535,12 @@ fn run() -> Result<(), String> {
         }
         let acks = std::mem::take(&mut shared.lock().unwrap().acks);
         for ack in &acks {
-            menu.on_ack(ack, &settings);
+            if ack.key == "set_pose" {
+                // Not a setting: the result of placing the robot on the map.
+                menu.notify(if ack.text.is_empty() { "Robot placed".into() } else { ack.text.clone() }, ack.ok);
+            } else {
+                menu.on_ack(ack, &settings);
+            }
         }
         view_atomic.store(view.to_u8(), Ordering::Relaxed);
         // While the settings menu is open the D-pad and A drive the menu only, so
@@ -529,6 +553,17 @@ fn run() -> Result<(), String> {
             }
         }
         *input_shared.lock().unwrap() = sent;
+
+        // Robot mic: whatever arrived since the last frame goes to the speakers.
+        let audio_live = {
+            let mut s = shared.lock().unwrap();
+            let live = s.audio_at.is_some_and(|t| t.elapsed() < Duration::from_millis(500));
+            let samples = std::mem::take(&mut s.audio);
+            let rate = s.audio_rate;
+            drop(s);
+            player.tick(&samples, rate, live);
+            live
+        };
 
         let snap = {
             let s = shared.lock().unwrap();
@@ -549,6 +584,7 @@ fn run() -> Result<(), String> {
                 track: track.clone(),
                 track_pick: picking.then(|| pick.clone()),
                 nav_a_pending: nav.a_pending(),
+                audio_live,
                 scan: s.scan.clone(),
                 scan_age: age(s.scan_at),
                 frame: s.frame.clone(),

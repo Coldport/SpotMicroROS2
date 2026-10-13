@@ -6,6 +6,8 @@ After=network-online.target mosquitto.service
 [Service]
 Type=simple
 User=__USER__
+# The robot mic (Deck setting "Robot mic") is an ALSA device owned by group audio.
+SupplementaryGroups=audio
 WorkingDirectory=__REPO_DIR__
 # Sources ROS and this workspace, then runs deck_bridge + stack_launcher. It does
 # not start the sensors or anything that moves the robot; stack_launcher does

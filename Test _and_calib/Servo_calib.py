@@ -63,14 +63,14 @@ def clamp(val, lo, hi):
 def load_config():
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, "r") as f:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
             print(f"Failed to load config: {e}")
     return {}
 
 def save_config(data):
-    with open(CONFIG_FILE, "w") as f:
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
 
 # =========================
@@ -233,7 +233,7 @@ class ServoCalApp:
                 if v is not None:
                     try:
                         return float(v)
-                    except:
+                    except (TypeError, ValueError):
                         return v
         return default
 
@@ -327,7 +327,7 @@ class ServoCalApp:
                         if a > r:
                             self.manual_vars[l][j]["angle_var"].set(float(r))
                             self._set_slider_from_angle(l, j, float(r))
-                    except:
+                    except Exception:   # bad entry text (TclError/ValueError): ignore
                         pass
 
                 self.manual_vars[leg][joint] = {
@@ -574,7 +574,7 @@ class ServoCalApp:
         for pose in pts:
             x, y, z, r, p, ya = pose
             xh, yh, zh = ik_rotational_preprocess_xyz(ikname, x, y, z, r, p, ya, angles_in_degrees=True)
-            hip_d, th_d, kn_d = ik_inverse_kinematics_deg(ikname, x, y, z)
+            hip_d, th_d, kn_d = ik_inverse_kinematics_deg(ikname, xh, yh, zh)
             out.append({"Hip": hip_d, "Thigh": th_d, "Knee": kn_d})
             hip_vals.append(hip_d); th_vals.append(th_d); kn_vals.append(kn_d)
 
@@ -603,7 +603,7 @@ class ServoCalApp:
             pts = ik_create_points(start, end, steps)
 
             # Preview angles (DEGREES) and ask for confirmation
-            angles_list, summary = self._ik_preview_angles_over_path(leg, pts)
+            _, summary = self._ik_preview_angles_over_path(leg, pts)
             print(summary)
             self.status_var.set(summary.replace("\n", " | "))
             if not mb.askyesno("Confirm IK Start", f"{summary}\n\nProceed with this motion?"):

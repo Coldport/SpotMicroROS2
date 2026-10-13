@@ -41,30 +41,47 @@ class Leg:
         self.cal = leg_cal
         self.mirrored = leg_name in RIGHT_LEGS
 
-    def solve(self, x, y, z, roll=0.0, pitch=0.0, yaw=0.0):
+    def solve(self, x, y, z, roll=0.0, pitch=0.0, yaw=0.0, joint_angles=None):
         """
         Args:
             x, y, z: foot target in the BODY frame (mm).
             roll, pitch, yaw: body orientation (deg).
+            joint_angles: optional {"hip"/"thigh"/"knee": servo angle (deg)}
+                overriding IK for those joints. Same frame as joint_angles()
+                returns (right-leg mirror applied, offset NOT applied): the
+                offset is still added, which is what calibrating by angle needs.
 
         Returns:
             dict[int channel] -> float angle_deg, ready to write to that
             servo channel. A channel is omitted if the IK target was
             unreachable (non-finite result) for that joint.
         """
-        xh, yh, zh = rotational_preprocess_xyz(self.leg_name, x, y, z, roll, pitch, yaw)
-        hip_rad, lower_rad, upper_rad = inverse_kinematics(self.leg_name, xh, yh, zh)
-
+        angles = self.joint_angles(x, y, z, roll, pitch, yaw)
+        angles.update(joint_angles or {})
         out = {}
-        self._add(out, self.cal.hip, math.degrees(hip_rad))
-        self._add(out, self.cal.knee, math.degrees(lower_rad))
-        self._add(out, self.cal.thigh, math.degrees(upper_rad))
+        for joint, angle_deg in angles.items():
+            if angle_deg is not None:
+                joint_cal = getattr(self.cal, joint)
+                out[joint_cal.channel] = _clamp(angle_deg + joint_cal.offset, 0.0, joint_cal.range)
         return out
 
-    def _add(self, out, joint_cal, angle_deg):
-        if not math.isfinite(angle_deg):
-            return
-        if self.mirrored:
-            angle_deg = 180.0 - angle_deg
-        commanded = _clamp(angle_deg + joint_cal.offset, 0.0, joint_cal.range)
-        out[joint_cal.channel] = commanded
+    def joint_angles(self, x, y, z, roll=0.0, pitch=0.0, yaw=0.0):
+        """IK for a foot target -> {"hip"/"thigh"/"knee": servo angle (deg) before
+        the calibration offset, right-leg mirror applied}, or None for a joint
+        whose IK result is non-finite (unreachable)."""
+        xh, yh, zh = rotational_preprocess_xyz(self.leg_name, x, y, z, roll, pitch, yaw)
+        hip_rad, lower_rad, upper_rad = inverse_kinematics(self.leg_name, xh, yh, zh)
+        out = {}
+        for joint, rad in (("hip", hip_rad), ("knee", lower_rad), ("thigh", upper_rad)):
+            deg = math.degrees(rad)
+            if not math.isfinite(deg):
+                out[joint] = None
+                continue
+            out[joint] = 180.0 - deg if self.mirrored else deg
+        return out
+
+    def servo_command(self, joint, angle_deg):
+        """Servo angle (deg, pre-offset) for one joint -> the value actually
+        written to its channel (offset added, clamped to the servo's range)."""
+        joint_cal = getattr(self.cal, joint)
+        return _clamp(angle_deg + joint_cal.offset, 0.0, joint_cal.range)

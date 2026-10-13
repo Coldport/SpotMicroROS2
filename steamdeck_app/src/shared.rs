@@ -174,6 +174,11 @@ pub struct NavStatus {
     pub goal: Option<[f32; 2]>,
     #[serde(default)]
     pub path: Vec<[f32; 2]>,
+    /// Speed level (fraction of full, set with the D-pad) and what that is in m/s.
+    #[serde(default)]
+    pub speed: Option<f32>,
+    #[serde(default)]
+    pub speed_mps: Option<f32>,
 }
 /// gait_node's mode: "walk" | "sentry" | "calibrate" | "trick" | "imu_calib" | "auto_nav".
 #[derive(Deserialize, Clone, Default, Debug)]
@@ -330,6 +335,11 @@ pub struct Shared {
     pub acks: Vec<SettingAck>,
     pub track: Option<TrackStatus>,
     pub track_at: Option<Instant>,
+    /// Robot mic samples not yet handed to the audio device, their rate, and
+    /// when the last chunk came in.
+    pub audio: Vec<i16>,
+    pub audio_rate: u32,
+    pub audio_at: Option<Instant>,
 }
 
 pub type SharedRef = Arc<Mutex<Shared>>;

@@ -7,6 +7,9 @@
 #
 # It copies the binary to ~/spotmicro-deck, remembers the robot's address, and
 # adds a launcher so SpotMicro shows up in Steam's "Add a Non-Steam Game" list.
+# Re-running it updates an existing install, including any other copy a Steam
+# shortcut points at (EXTRA_COPIES below). deploy.sh wraps this script and the
+# binary into dist/spotmicro-deck-setup.sh.
 set -euo pipefail
 
 HOST="${1:-}"
@@ -15,8 +18,24 @@ BIN="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/spotmicro-deck"
 [ -n "$HOST" ] || { echo "usage: $0 <robot-ip-or-hostname>   (e.g. 192.168.1.185)" >&2; exit 1; }
 
 DEST="$HOME/spotmicro-deck"
+# Copies that a hand-made Steam shortcut may launch instead; updated if present.
+EXTRA_COPIES=("$HOME/Documents/steamdeck_app/spotmicro-deck")
+
+# Copy next to the target, then rename over it: works while the app is running
+# (a plain copy onto a running binary fails with "Text file busy").
+put() {
+    install -m 755 "$BIN" "$1.new"
+    mv -f "$1.new" "$1"
+}
+
 mkdir -p "$DEST" "$HOME/.config/spotmicro-deck" "$HOME/.local/share/applications"
-install -m 755 "$BIN" "$DEST/spotmicro-deck"
+put "$DEST/spotmicro-deck"
+for extra in "${EXTRA_COPIES[@]}"; do
+    if [ -f "$extra" ]; then
+        put "$extra"
+        echo "Updated $extra"
+    fi
+done
 echo "$HOST" > "$HOME/.config/spotmicro-deck/host"
 
 cat > "$HOME/.local/share/applications/spotmicro-deck.desktop" <<DESKTOP
