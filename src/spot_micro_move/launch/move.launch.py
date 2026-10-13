@@ -1,9 +1,15 @@
 """
-move.launch.py — gait_node, standalone.
+move.launch.py — gait_node, nav_node and track_node, standalone.
 
 Not part of spot_micro_bringup on purpose: bringup stays sensing-only.
 gait_node opens the real I2C/PCA9685 bus at startup (no dry-run mode) but
 starts DISARMED — nothing is commanded until the Deck holds l3+r3 for 3s.
+
+nav_node (auto-nav planner) touches no hardware and only publishes cmd_vel
+while gait_node is in auto_nav mode (double-tap A on the Deck, armed).
+
+track_node (sentry object tracking) only decodes camera frames while a target
+picked on the Deck is being followed.
 
     ros2 launch spot_micro_move move.launch.py
 """
@@ -60,5 +66,23 @@ def generate_launch_description():
             parameters=[default_params, {
                 'calibration_path': LaunchConfiguration('calibration_path'),
             }],
+        ),
+
+        Node(
+            package='spot_micro_move',
+            executable='nav_node',
+            name='nav_node',
+            output='screen',
+            parameters=[os.path.join(
+                get_package_share_directory('spot_micro_move'), 'config', 'nav_params.yaml')],
+        ),
+
+        Node(
+            package='spot_micro_move',
+            executable='track_node',
+            name='track_node',
+            output='screen',
+            parameters=[os.path.join(
+                get_package_share_directory('spot_micro_move'), 'config', 'track_params.yaml')],
         ),
     ])

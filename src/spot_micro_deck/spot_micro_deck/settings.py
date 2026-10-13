@@ -79,14 +79,33 @@ SETTINGS = [
     _f('level_max_deg', 'Max correction', 'Leveling', 0.0, 20.0, 1.0, 'deg'),
     _f('level_trim_roll', 'Level roll trim', 'Leveling', -20.0, 20.0, 0.5, 'deg', 'IMU roll that counts as level.'),
     _f('level_trim_pitch', 'Level pitch trim', 'Leveling', -20.0, 20.0, 0.5, 'deg', 'IMU pitch that counts as level.'),
+    Setting('walk_stab_enabled', 'Stabilise while walking', 'Leveling', 'bool',
+            help='With IMU leveling on: fast tilt correction, lean, slow-down and heading hold while walking.'),
+    _f('walk_level_kp', 'Walk tilt response', 'Leveling', 0.0, 2.0, 0.05, 'x',
+       'Fast correction per degree of tilt while walking.'),
+    _f('walk_level_kd', 'Walk tilt damping', 'Leveling', 0.0, 0.3, 0.01, 's',
+       'Correction per deg/s of tilt rate (gyro). Too much = jitter.'),
+    _f('walk_com_gain', 'Walk lean', 'Leveling', 0.0, 4.0, 0.25, 'mm/deg',
+       'Shift the body away from the side it tips toward.'),
+    _f('walk_tilt_slow_deg', 'Slow down past', 'Leveling', 2.0, 20.0, 1.0, 'deg',
+       'Steps slow down when the body tilts more than this.'),
+    _f('walk_heading_gain', 'Heading hold', 'Leveling', 0.0, 3.0, 0.1, 'x',
+       'Steer back to the IMU heading when walking with the turn stick centred. 0 = off.'),
     # ── Sentry (double-tap Y) ──
     _f('sentry_max_roll_deg', 'Max roll', 'Sentry', 0.0, 30.0, 1.0, 'deg', 'Left stick X at full tilt.'),
     _f('sentry_max_pitch_deg', 'Max pitch', 'Sentry', 0.0, 30.0, 1.0, 'deg', 'Left stick Y at full tilt.'),
     _f('sentry_max_yaw_deg', 'Max yaw', 'Sentry', 0.0, 30.0, 1.0, 'deg', 'Right stick X at full tilt.'),
     _f('sentry_rate_deg_s', 'Pose speed', 'Sentry', 5.0, 120.0, 5.0, 'deg/s', 'How fast the body follows the sticks.'),
+    _f('track_gain', 'Tracking speed', 'Sentry', 0.0, 5.0, 0.1, '1/s',
+       'How hard the body turns toward a tracked object. Too high overshoots.'),
+    _f('track_deadband_deg', 'Tracking deadband', 'Sentry', 0.0, 10.0, 0.5, 'deg',
+       'Off-centre error ignored while tracking.'),
     # ── Calibration (hold Y + D-pad up) ──
     _f('calib_step_deg', 'D-pad up/down step', 'Calibration', 0.25, 5.0, 0.25, 'deg'),
     _f('calib_fine_step_deg', 'D-pad left/right step', 'Calibration', 0.05, 1.0, 0.05, 'deg'),
+    _f('calib_angle_step_deg', 'Angle test R-stick ↑↓', 'Calibration', 1.0, 45.0, 1.0, 'deg'),
+    _f('calib_angle_fine_deg', 'Angle test R-stick ←→', 'Calibration', 0.25, 5.0, 0.25, 'deg'),
+    _f('calib_angle_speed_deg_s', 'Angle test joint speed', 'Calibration', 10.0, 180.0, 10.0, 'deg/s'),
     # ── Video (this bridge) ──
     _f('video_max_fps', 'Video frame cap', 'Video', 2.0, 30.0, 1.0, 'fps', target='bridge'),
     Setting('jpeg_quality', 'Depth JPEG quality', 'Video', 'int', 'bridge', 20, 95, 5,
@@ -99,6 +118,9 @@ SETTINGS = [
     Setting('save_map', 'Save map', 'Map', 'action', 'bridge',
             help='Saves the current SLAM map on the robot (~/spotmicro_maps, newest = static_map). '
                  'Press A twice.'),
+    Setting('load_map', 'Load saved map', 'Map', 'action', 'bridge',
+            help='SLAM carries on from the last saved map. Put the robot where that map was '
+                 'started (facing the same way) first. Press A twice.'),
     # ── Robot ──
     Setting('shutdown', 'Shut down robot', 'Robot', 'action', 'bridge',
             help='Powers the robot\'s computer off (disarm first). Press A twice. '

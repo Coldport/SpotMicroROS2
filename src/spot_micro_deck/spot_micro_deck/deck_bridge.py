@@ -20,6 +20,14 @@ The Deck has no ROS install, so it talks to the robot through a Mosquitto broker
     `maps_dir` as map_<date>_<time> — a map_server .pgm/.yaml (the static map)
     plus slam_toolbox's serialized pose graph (.posegraph/.data, which its
     localization mode can load). static_map.* symlinks point at the newest save.
+    "Load saved map" hands that pose graph back to slam_toolbox, so SLAM carries
+    on from the saved map (the robot must start where that map was begun).
+  * The saved static map goes to the Deck too (retained), for the auto-nav view.
+  * Auto nav: goals / cancels / speed steps from the Deck go to nav_node
+    (spot_micro_move), and its status comes back in the state message ("nav").
+    "The robot is here" from the Deck reloads the saved pose graph into
+    slam_toolbox with the robot at that pose (START_AT_GIVEN_POSE), so a robot
+    that didn't start where the map was begun can still navigate on it.
 
 Camera and lidar subscriptions only exist while a Deck is online and looking at
 that view, and depth is only colorized/encoded while the depth view is on
@@ -54,12 +62,14 @@ from rclpy.qos import (DurabilityPolicy, QoSProfile, ReliabilityPolicy,
 from rclpy.time import Time
 from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import CompressedImage, Image, Imu, Joy, LaserScan
-from slam_toolbox.srv import Reset, SaveMap, SerializePoseGraph
-from std_msgs.msg import Bool, String
+from geometry_msgs.msg import PoseStamped
+from slam_toolbox.srv import DeserializePoseGraph, Reset, SaveMap, SerializePoseGraph
+from std_msgs.msg import Bool, Empty, Int32, String
 
 from spot_micro_deck import param_file
 from spot_micro_deck import protocol as P
 from spot_micro_deck import settings as S
+from spot_micro_deck import static_map
 
 try:
     from spot_micro_camera.detect import detect_camera
@@ -138,6 +148,14 @@ class DeckBridge(Node):
         self.declare_parameter('bridge_params_files', '')
         # Where the Deck's "Save map" writes the SLAM map ('~' is expanded).
         self.declare_parameter('maps_dir', '~/spotmicro_maps')
+        # Auto nav (spot_micro_move nav_node).
+        self.declare_parameter('nav_goal_topic', '/spotmicro_move/nav_goal')
+        self.declare_parameter('nav_cancel_topic', '/spotmicro_move/nav_cancel')
+        self.declare_parameter('nav_status_topic', '/spotmicro_move/nav_status')
+        self.declare_parameter('nav_speed_topic', '/spotmicro_move/nav_speed')
+        # Sentry object tracking (spot_micro_move track_node).
+        self.declare_parameter('track_cmd_topic', '/spotmicro_track/cmd')
+        self.declare_parameter('track_status_topic', '/spotmicro_track/status')
 
         p = self.get_parameter
         self._t = P.topics(p('topic_prefix').value)
@@ -207,8 +225,21 @@ class DeckBridge(Node):
         self._slam_reset = self.create_client(Reset, '/slam_toolbox/reset')
         self._slam_save = self.create_client(SaveMap, '/slam_toolbox/save_map')
         self._slam_serialize = self.create_client(SerializePoseGraph, '/slam_toolbox/serialize_map')
+        self._slam_load = self.create_client(DeserializePoseGraph, '/slam_toolbox/deserialize_map')
         self._maps_dir = os.path.expanduser(p('maps_dir').value)
         self._saving_map = False
+        self._static_map_payload = self._load_static_map()
+
+        self._nav_goal_pub = self.create_publisher(PoseStamped, p('nav_goal_topic').value, 10)
+        self._nav_cancel_pub = self.create_publisher(Empty, p('nav_cancel_topic').value, 10)
+        self._nav_speed_pub = self.create_publisher(Int32, p('nav_speed_topic').value, 10)
+        self._nav = None               # nav_node's status message (dict)
+        self.create_subscription(
+            String, p('nav_status_topic').value, self._on_nav_status,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                       reliability=ReliabilityPolicy.RELIABLE))
+        self._track_cmd_pub = self.create_publisher(String, p('track_cmd_topic').value, 10)
+        self.create_subscription(String, p('track_status_topic').value, self._on_track_status, 10)
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
@@ -269,10 +300,12 @@ class DeckBridge(Node):
             return
         self.get_logger().info('Connected to MQTT broker.')
         client.subscribe([(self._t['deck_online'], 1), (self._t['deck_view'], 0),
-                          (self._t['deck_input'], 0), (self._t['deck_set'], 1)])
+                          (self._t['deck_input'], 0), (self._t['deck_set'], 1),
+                          (self._t['deck_nav'], 1), (self._t['deck_track'], 1)])
         client.publish(self._t['robot_online'], '1', qos=1, retain=True)
         if self._map_payload is not None:
             client.publish(self._t['map'], self._map_payload, qos=1, retain=True)
+        client.publish(self._t['static_map'], self._static_map_payload, qos=1, retain=True)
 
     def _on_mqtt_disconnect(self, _client, _userdata, rc):
         if rc != 0:
@@ -288,6 +321,10 @@ class DeckBridge(Node):
                 key, value = P.decode_set(msg.payload)
                 with self._lock:
                     self._set_queue.append((key, value))
+            elif msg.topic == self._t['deck_nav']:
+                self._handle_nav(P.decode_nav(msg.payload))
+            elif msg.topic == self._t['deck_track']:
+                self._handle_track(P.decode_track(msg.payload))
             elif msg.topic == self._t['deck_online']:
                 self._handle_deck_online(msg.payload.decode('utf-8', 'replace').strip() == '1')
         except Exception as exc:   # never let a bad message kill the MQTT thread
@@ -301,6 +338,40 @@ class DeckBridge(Node):
             self._input_stale = False
         self._counts['input'] += 1
         self._publish_joy(axes, buttons)
+
+    def _handle_nav(self, cmd):
+        if cmd[0] == 'cancel':
+            self._nav_cancel_pub.publish(Empty())
+            return
+        if cmd[0] == 'speed':
+            self._nav_speed_pub.publish(Int32(data=cmd[1]))
+            return
+        if cmd[0] == 'pose':
+            self._set_robot_pose(*cmd[1:])
+            return
+        goal = PoseStamped()
+        goal.header.frame_id = self._map_frame
+        goal.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.position.x, goal.pose.position.y = cmd[1], cmd[2]
+        goal.pose.orientation.w = 1.0
+        self._nav_goal_pub.publish(goal)
+
+    def _handle_track(self, cmd):
+        out = {'cmd': 'stop'} if cmd[0] == 'stop' else {'cmd': 'start', 'box': cmd[1]}
+        self._track_cmd_pub.publish(String(data=json.dumps(out, separators=(',', ':'))))
+
+    def _on_track_status(self, msg):
+        # Small and only frequent while tracking: straight through, for the Deck's box overlay.
+        if self._deck_active():
+            self._mqtt.publish(self._t['track'], msg.data, qos=0)
+
+    def _on_nav_status(self, msg):
+        try:
+            nav = json.loads(msg.data)
+        except ValueError:
+            return
+        if isinstance(nav, dict):
+            self._nav = nav
 
     def _handle_view(self, name):
         if name not in P.VIEW_NAMES:
@@ -677,6 +748,9 @@ class DeckBridge(Node):
         if key == 'save_map':
             self._save_map()
             return
+        if key == 'load_map':
+            self._load_map_into_slam()
+            return
         if key != 'shutdown':
             self._ack(key, False, True, 'not implemented')
             return
@@ -748,6 +822,8 @@ class DeckBridge(Node):
                 except OSError as exc:
                     self.get_logger().warn(f'Could not link {link}: {exc}')
             self._saving_map = False
+            self._static_map_payload = self._load_static_map()
+            self._mqtt.publish(self._t['static_map'], self._static_map_payload, qos=1, retain=True)
             self._ack(key, True, True, f'Map saved: {name}')
             self.get_logger().info(f'Deck: saved the SLAM map to {base}.*')
 
@@ -765,6 +841,74 @@ class DeckBridge(Node):
         req.name.data = base
         self._slam_save.call_async(req).add_done_callback(saved)
         self.get_logger().info(f'Deck: saving the SLAM map to {base}.*')
+
+    def _static_map_base(self):
+        return os.path.join(self._maps_dir, 'static_map')
+
+    def _load_static_map(self):
+        """The newest saved map as a <prefix>/static_map payload (b'' if none)."""
+        path = self._static_map_base() + '.yaml'
+        if not os.path.exists(path):
+            return b''
+        try:
+            w, h, res, ox, oy, cells = static_map.load(path)
+        except static_map.MapLoadError as exc:
+            self.get_logger().warn(f'Saved map not loaded: {exc}')
+            return b''
+        self.get_logger().info(f'Static map for the Deck: {os.path.realpath(path)} ({w}x{h})')
+        return P.pack_map(w, h, res, ox, oy, zlib.compress(cells.tobytes(), 6))
+
+    def _load_map_into_slam(self):
+        key = 'load_map'
+        base = self._static_map_base()
+        if not os.path.exists(base + '.posegraph'):
+            self._ack(key, False, True, 'no saved map yet (Map > Save map first)')
+            return
+        if not self._slam_load.service_is_ready():
+            self._ack(key, False, True, 'SLAM not running (hold L1+R1 to start the stack)')
+            return
+        if self._gait_running and self._mode and self._mode.get('mode') == 'auto_nav':
+            self._ack(key, False, True, 'leave auto nav first (double-tap A)')
+            return
+        req = DeserializePoseGraph.Request()
+        req.filename = os.path.realpath(base + '.posegraph')[:-len('.posegraph')]
+        req.match_type = DeserializePoseGraph.Request.START_AT_FIRST_NODE
+
+        def done(future):
+            ok = future.exception() is None
+            self._ack(key, ok, True, 'Saved map loaded — SLAM continues from it'
+                      if ok else f'load failed: {future.exception()}')
+
+        self._slam_load.call_async(req).add_done_callback(done)
+        self.get_logger().info(f'Deck: loading {req.filename} into slam_toolbox.')
+
+    def _set_robot_pose(self, x, y, yaw):
+        """Reload the saved pose graph with the robot at (x, y, yaw) in the map
+        frame. slam_toolbox scan-matches the first scan near that pose, so it
+        only has to be roughly right. Stops any nav goal first: the map -> odom
+        transform jumps."""
+        key = 'set_pose'
+        base = self._static_map_base()
+        if not os.path.exists(base + '.posegraph'):
+            self._ack(key, False, None, 'no saved map to place the robot on (Map > Save map first)')
+            return
+        if not self._slam_load.service_is_ready():
+            self._ack(key, False, None, 'SLAM not running (hold L1+R1 to start the stack)')
+            return
+        self._nav_cancel_pub.publish(Empty())
+        req = DeserializePoseGraph.Request()
+        req.filename = os.path.realpath(base + '.posegraph')[:-len('.posegraph')]
+        req.match_type = DeserializePoseGraph.Request.START_AT_GIVEN_POSE
+        req.initial_pose.x, req.initial_pose.y, req.initial_pose.theta = x, y, yaw
+        where = f'{x:.1f}, {y:.1f} m facing {math.degrees(yaw):.0f}°'
+
+        def done(future):
+            ok = future.exception() is None
+            self._ack(key, ok, [round(x, 3), round(y, 3), round(yaw, 3)],
+                      f'Robot placed at {where}' if ok else f'placing failed: {future.exception()}')
+
+        self._slam_load.call_async(req).add_done_callback(done)
+        self.get_logger().info(f'Deck: robot is at {where}; loading {req.filename} into slam_toolbox there.')
 
     # ── state summary ────────────────────────────────────────────────────────
 
@@ -816,6 +960,7 @@ class DeckBridge(Node):
             # Forwarded disarmed too: by-hand IMU calibration runs then, and the
             # mode message carries result notes ("IMU zeroed"). The Deck hides "walk".
             'mode': self._mode if self._gait_running else None,
+            'nav': self._nav if self._gait_running else None,
             'rates': self._rates,
             'depth_range_m': [round(self._depth_min_mm / 1000.0, 2), round(self._depth_max_mm / 1000.0, 2)],
             'sys': {'cpu_temp_c': self._read_cpu_temp_c(), 'load1': round(os.getloadavg()[0], 2)},
