@@ -15,7 +15,7 @@ use rumqttc::{Client, Event, LastWill, MqttOptions, Packet, QoS};
 
 use crate::input::InputState;
 use crate::protocol::{self, Topics};
-use crate::shared::{Frame, RobotState, SettingAck, SettingsMsg, SharedRef, View};
+use crate::shared::{Frame, RobotState, SettingAck, SettingsMsg, SharedRef, TrackStatus, View};
 
 pub struct NetConfig {
     pub host: String,
@@ -38,6 +38,48 @@ impl Commander {
     pub fn set(&self, key: &str, value: &serde_json::Value) -> bool {
         self.client
             .try_publish(&self.topics.deck_set, QoS::AtLeastOnce, false, protocol::encode_set(key, value))
+            .is_ok()
+    }
+
+    /// Auto nav: walk to (x, y) in the map frame.
+    pub fn nav_goal(&self, x: f32, y: f32) -> bool {
+        self.client
+            .try_publish(&self.topics.deck_nav, QoS::AtLeastOnce, false, protocol::encode_nav_goal(x, y))
+            .is_ok()
+    }
+
+    /// Auto nav: stop.
+    pub fn nav_cancel(&self) -> bool {
+        self.client
+            .try_publish(&self.topics.deck_nav, QoS::AtLeastOnce, false, protocol::encode_nav_cancel())
+            .is_ok()
+    }
+
+    /// Auto nav: one speed level up (+1) or down (-1).
+    pub fn nav_speed(&self, step: i32) -> bool {
+        self.client
+            .try_publish(&self.topics.deck_nav, QoS::AtLeastOnce, false, protocol::encode_nav_speed(step))
+            .is_ok()
+    }
+
+    /// Auto nav: the robot is here (map frame); the result comes back as a "set_pose" ack.
+    pub fn nav_pose(&self, x: f32, y: f32, yaw: f32) -> bool {
+        self.client
+            .try_publish(&self.topics.deck_nav, QoS::AtLeastOnce, false, protocol::encode_nav_pose(x, y, yaw))
+            .is_ok()
+    }
+
+    /// Sentry: track what's in this normalised camera-image box.
+    pub fn track_start(&self, b: [f32; 4]) -> bool {
+        self.client
+            .try_publish(&self.topics.deck_track, QoS::AtLeastOnce, false, protocol::encode_track_start(b))
+            .is_ok()
+    }
+
+    /// Sentry: stop tracking.
+    pub fn track_stop(&self) -> bool {
+        self.client
+            .try_publish(&self.topics.deck_track, QoS::AtLeastOnce, false, protocol::encode_track_stop())
             .is_ok()
     }
 }
@@ -145,9 +187,12 @@ pub fn start(
                     let _ = client.try_subscribe(&topics.state, QoS::AtMostOnce);
                     let _ = client.try_subscribe(&topics.scan, QoS::AtMostOnce);
                     let _ = client.try_subscribe(&topics.map, QoS::AtLeastOnce);
+                    let _ = client.try_subscribe(&topics.static_map, QoS::AtLeastOnce);
                     let _ = client.try_subscribe(&topics.robot_online, QoS::AtLeastOnce);
                     let _ = client.try_subscribe(&topics.settings, QoS::AtMostOnce);
                     let _ = client.try_subscribe(&topics.settings_ack, QoS::AtLeastOnce);
+                    let _ = client.try_subscribe(&topics.track, QoS::AtMostOnce);
+                    let _ = client.try_subscribe(&topics.audio, QoS::AtMostOnce);
                 }
                 Ok(Event::Incoming(Packet::Publish(p))) => {
                     dispatch(&topics, &p.topic, &p.payload, &shared, &slot);
@@ -199,6 +244,17 @@ fn dispatch(topics: &Topics, topic: &str, payload: &[u8], shared: &SharedRef, sl
             }
             Err(e) => shared.lock().unwrap().last_error = format!("map: {e}"),
         }
+    } else if topic == topics.static_map {
+        // Empty (retained) payload: no map saved on the robot.
+        let parsed = if payload.is_empty() { Ok(None) } else { protocol::parse_map(payload).map(Some) };
+        match parsed {
+            Ok(m) => {
+                let mut s = shared.lock().unwrap();
+                s.static_map = m.map(Arc::new);
+                s.static_map_version += 1;
+            }
+            Err(e) => shared.lock().unwrap().last_error = format!("static map: {e}"),
+        }
     } else if topic == topics.scan {
         if let Ok(sc) = protocol::parse_scan(payload) {
             let mut s = shared.lock().unwrap();
@@ -214,9 +270,28 @@ fn dispatch(topics: &Topics, topic: &str, payload: &[u8], shared: &SharedRef, sl
             }
             Err(e) => shared.lock().unwrap().last_error = format!("settings: {e}"),
         }
+    } else if topic == topics.audio {
+        if let Ok((protocol::AUDIO_MULAW, rate, _seq, bytes)) = protocol::parse_audio(payload) {
+            let mut s = shared.lock().unwrap();
+            s.audio_rate = rate as u32;
+            s.audio_at = Some(Instant::now());
+            s.audio.extend(bytes.iter().map(|&b| crate::audio::mulaw_to_i16(b)));
+            // The UI thread drains this every frame; if it stalls, keep the newest second.
+            let cap = rate as usize;
+            if s.audio.len() > cap {
+                let extra = s.audio.len() - cap;
+                s.audio.drain(..extra);
+            }
+        }
     } else if topic == topics.settings_ack {
         if let Ok(ack) = serde_json::from_slice::<SettingAck>(payload) {
             shared.lock().unwrap().acks.push(ack);
+        }
+    } else if topic == topics.track {
+        if let Ok(t) = serde_json::from_slice::<TrackStatus>(payload) {
+            let mut s = shared.lock().unwrap();
+            s.track = Some(t);
+            s.track_at = Some(Instant::now());
         }
     } else if topic == topics.robot_online {
         shared.lock().unwrap().robot_online = Some(payload == b"1");

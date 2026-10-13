@@ -55,7 +55,7 @@ def load_calibration(path="config/servo_calibration.yaml"):
     name ("FL", "FR", "RL", "RR").
     """
     path = Path(path)
-    with path.open("r") as f:
+    with path.open("r", encoding='utf-8') as f:
         raw = yaml.safe_load(f)
 
     calibration = {}
@@ -119,7 +119,7 @@ def save_offsets(path, calibration):
     """Write the joint offsets in `calibration` back into the YAML at `path`
     (atomic replace; symlinks followed). Only `offset:` values change."""
     path = os.path.realpath(path)
-    with open(path) as f:
+    with open(path, encoding='utf-8') as f:
         text = f.read()
     new_text = update_offsets_text(text, calibration)
     if new_text == text:

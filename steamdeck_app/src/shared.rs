@@ -123,6 +123,16 @@ pub struct CalibInfo {
     /// Result of the last save ("saved to …", "SAVE FAILED: …").
     #[serde(default)]
     pub note: String,
+    /// Angle test (A): the selected joint is held at `target` (servo deg, before
+    /// the offset); `angle` is where it is commanded now, `servo` what the servo gets.
+    #[serde(default)]
+    pub angle_mode: bool,
+    #[serde(default)]
+    pub target: Option<f32>,
+    #[serde(default)]
+    pub angle: Option<f32>,
+    #[serde(default)]
+    pub servo: Option<f32>,
 }
 /// IMU axis calibration progress: step "level" | "left" | "right" | "front" | "back" | "return".
 #[derive(Deserialize, Clone, Default, Debug)]
@@ -152,7 +162,25 @@ pub struct ModeNote {
     #[serde(default)]
     pub ok: bool,
 }
-/// gait_node's mode: "walk" | "sentry" | "calibrate" | "trick" | "imu_calib".
+/// nav_node's progress (auto nav): state "idle" | "driving" | "blocked" | "arrived" | "failed".
+#[derive(Deserialize, Clone, Default, Debug)]
+pub struct NavStatus {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub text: String,
+    /// Map frame, metres.
+    #[serde(default)]
+    pub goal: Option<[f32; 2]>,
+    #[serde(default)]
+    pub path: Vec<[f32; 2]>,
+    /// Speed level (fraction of full, set with the D-pad) and what that is in m/s.
+    #[serde(default)]
+    pub speed: Option<f32>,
+    #[serde(default)]
+    pub speed_mps: Option<f32>,
+}
+/// gait_node's mode: "walk" | "sentry" | "calibrate" | "trick" | "imu_calib" | "auto_nav".
 #[derive(Deserialize, Clone, Default, Debug)]
 pub struct ModeInfo {
     pub mode: String,
@@ -167,6 +195,30 @@ pub struct ModeInfo {
     pub imu_calib: Option<ImuCalibInfo>,
     #[serde(default)]
     pub note: Option<ModeNote>,
+    /// auto_nav: the left stick is driving by hand, overriding the planner.
+    #[serde(default)]
+    pub manual: bool,
+    /// sentry: the body is following a tracked object (not the sticks).
+    #[serde(default)]
+    pub tracking: bool,
+}
+/// Sentry object tracking status from the robot's track_node (<p>/track).
+#[derive(Deserialize, Clone, Default, Debug)]
+pub struct TrackStatus {
+    /// "idle" | "starting" | "tracking" | "lost"
+    #[serde(default)]
+    pub state: String,
+    /// Normalised camera-image box [x, y, w, h].
+    #[serde(default)]
+    pub r#box: Option<[f32; 4]>,
+    #[serde(default)]
+    pub err_deg: Option<[f32; 2]>,
+}
+impl TrackStatus {
+    /// Following something (or looking for it again).
+    pub fn active(&self) -> bool {
+        matches!(self.state.as_str(), "starting" | "tracking" | "lost")
+    }
 }
 #[derive(Deserialize, Clone, Default, Debug)]
 pub struct Sys {
@@ -201,6 +253,8 @@ pub struct RobotState {
     /// Only while armed.
     #[serde(default)]
     pub mode: Option<ModeInfo>,
+    #[serde(default)]
+    pub nav: Option<NavStatus>,
 }
 
 /// One live-tunable robot setting, as the robot describes it on the settings
@@ -266,6 +320,9 @@ pub struct Shared {
     pub state_at: Option<Instant>,
     pub map: Option<Arc<MapData>>,
     pub map_version: u64,
+    /// The robot's saved map (Map > Save map); None if nothing is saved.
+    pub static_map: Option<Arc<MapData>>,
+    pub static_map_version: u64,
     pub scan: Option<Arc<ScanData>>,
     pub scan_at: Option<Instant>,
     pub frame: Option<Arc<Frame>>,
@@ -276,6 +333,13 @@ pub struct Shared {
     pub settings_at: Option<Instant>,
     /// Replies not yet handled by the UI thread.
     pub acks: Vec<SettingAck>,
+    pub track: Option<TrackStatus>,
+    pub track_at: Option<Instant>,
+    /// Robot mic samples not yet handed to the audio device, their rate, and
+    /// when the last chunk came in.
+    pub audio: Vec<i16>,
+    pub audio_rate: u32,
+    pub audio_at: Option<Instant>,
 }
 
 pub type SharedRef = Arc<Mutex<Shared>>;
@@ -327,6 +391,40 @@ mod tests {
         let m = st.mode.unwrap();
         assert_eq!(m.imu_calib.unwrap().step, "right");
         assert_eq!(m.note.unwrap().seq, 3);
+
+        // nav_node status, as forwarded by deck_bridge
+        let st: RobotState = serde_json::from_str(
+            r#"{"mode":{"mode":"auto_nav","manual":false},"nav":{"state":"driving","text":"1.2 m to go",
+            "goal":[1.5,-0.25],"path":[[0,0],[1.5,-0.25]],"left_m":1.2}}"#,
+        )
+        .unwrap();
+        let nav = st.nav.unwrap();
+        assert_eq!(nav.goal, Some([1.5, -0.25]));
+        assert_eq!(nav.path.len(), 2);
+        assert!(!st.mode.unwrap().manual);
+    }
+
+    #[test]
+    fn parses_track_status_and_angle_test() {
+        let t: TrackStatus = serde_json::from_str(
+            r#"{"state":"tracking","seq":4,"box":[0.1,0.2,0.3,0.4],"err_deg":[-3.5,1.25]}"#,
+        )
+        .unwrap();
+        assert!(t.active());
+        assert_eq!(t.r#box, Some([0.1, 0.2, 0.3, 0.4]));
+        let t: TrackStatus = serde_json::from_str(r#"{"state":"idle","seq":5,"box":null,"err_deg":null}"#).unwrap();
+        assert!(!t.active() && t.r#box.is_none());
+
+        let st: RobotState = serde_json::from_str(
+            r#"{"mode":{"mode":"calibrate","calib":{"leg":"FL","joint":"hip","offset":1.0,"offsets":{},
+            "unsaved":true,"note":"","angle_mode":true,"target":95.0,"angle":93.5,"servo":94.5}}}"#,
+        )
+        .unwrap();
+        let c = st.mode.unwrap().calib.unwrap();
+        assert!(c.angle_mode);
+        assert_eq!((c.target, c.angle, c.servo), (Some(95.0), Some(93.5), Some(94.5)));
+        let st: RobotState = serde_json::from_str(r#"{"mode":{"mode":"sentry","pose":{"roll":0,"pitch":1,"yaw":2},"tracking":true}}"#).unwrap();
+        assert!(st.mode.unwrap().tracking);
     }
 
     #[test]

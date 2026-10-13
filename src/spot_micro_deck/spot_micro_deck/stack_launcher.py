@@ -109,7 +109,7 @@ class StackLauncher(Node):
     def _other_stack_running(self):
         try:
             found = subprocess.run(['pgrep', '-f', self._busy_pattern],
-                                   capture_output=True, text=True, timeout=5)
+                                   capture_output=True, check=False, text=True, timeout=5)
         except (OSError, subprocess.SubprocessError) as e:
             self.get_logger().warn(f'Could not check for a running stack ({e}); not launching.')
             return True

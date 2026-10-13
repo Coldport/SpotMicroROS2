@@ -1,19 +1,24 @@
 //! SpotMicro Steam Deck app: live camera / depth / lidar / map from the robot,
 //! the Deck's controller input sent back to it, and a settings menu (Start/☰)
 //! for the robot's live-tunable gait and video settings — all over MQTT. The
-//! View (⧉) button shows every control and trick trigger.
+//! View (⧉) button shows every control and trick trigger. In auto nav mode
+//! (A×2 on the robot) the screen becomes a map to pick goals on (navview.rs).
 //!
 //! Usage: spotmicro-deck [--host HOST[:PORT]] [--port N] [--user U --password P]
 //!                       [--prefix TOPIC_PREFIX] [--windowed] [--menu] [--controls]
 //! The host can also come from $SPOTDECK_HOST or ~/.config/spotmicro-deck/host.
 
+mod audio;
 mod bt;
+mod demo;
 mod input;
 mod menu;
+mod navview;
 mod net;
 mod protocol;
 mod shared;
 mod text;
+mod track;
 mod ui;
 
 use std::fs::File;
@@ -31,7 +36,9 @@ use sdl2::video::Window;
 
 use input::{Action, Dir, Gamepad, InputState};
 use menu::Menu;
+use navview::{NavCam, NavCmd};
 use shared::{Shared, View};
+use track::TrackPick;
 use ui::{Snapshot, Ui, LOGICAL_H, LOGICAL_W};
 
 #[derive(Default)]
@@ -54,6 +61,8 @@ struct Args {
     /// Scripted L2 presses with a screenshot of each view saved into this directory.
     selftest: Option<String>,
     quit_after: Option<f32>,
+    /// Fake robot in auto nav mode (no connection): for screenshots of the nav view.
+    demo_nav: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -86,6 +95,7 @@ fn parse_args() -> Result<Args, String> {
                 }
             }
             "--selftest" => a.selftest = Some(value("--selftest")?),
+            "--demo-nav" => a.demo_nav = true,
             "--quit-after" => a.quit_after = Some(value("--quit-after")?.parse().map_err(|_| "bad --quit-after")?),
             "-h" | "--help" => {
                 println!(
@@ -183,6 +193,8 @@ fn run() -> Result<(), String> {
         .or_else(config_host)
         .unwrap_or_else(|| "spotmicro.local".to_string());
     let (host, port) = split_host(&spec, args.port.unwrap_or(1883));
+    // The demo must not talk to a real robot.
+    let (host, port) = if args.demo_nav { ("127.0.0.1".to_string(), 9) } else { (host, port) };
     let host_label = format!("{host}:{port}");
 
     // Steam Input can deliver events while another window (Steam's overlay) has focus.
@@ -190,6 +202,7 @@ fn run() -> Result<(), String> {
     let sdl = sdl2::init()?;
     let video = sdl.video()?;
     let game_controller = sdl.game_controller()?;
+    let mut player = audio::Player::new(sdl.audio().ok());
     let mut pump = sdl.event_pump()?;
     sdl.mouse().show_cursor(false);
 
@@ -239,6 +252,19 @@ fn run() -> Result<(), String> {
     }
 
     let mut view = args.view.unwrap_or(View::Color);
+    let mut nav = NavCam::default();
+    let mut pick = TrackPick::default();
+    if args.demo_nav {
+        // Demo screenshots of a rotated / zoomed view: SPOTDECK_DEMO_ROT (deg), SPOTDECK_DEMO_ZOOM (px/m).
+        let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok());
+        if let Some(r) = env("SPOTDECK_DEMO_ROT") {
+            nav.rot = r.to_radians();
+        }
+        if let Some(z) = env("SPOTDECK_DEMO_ZOOM") {
+            nav.zoom = z;
+        }
+    }
+    let mut last_frame = Instant::now();
     let mut menu = Menu::default();
     menu.open = args.menu;
     menu.controls_open = args.controls && !args.menu;
@@ -295,6 +321,9 @@ fn run() -> Result<(), String> {
 
         let events: Vec<Event> = pump.poll_iter().chain(injected).collect();
         let mut actions: Vec<Action> = Vec::new();
+        let mut actions_tap: Vec<(f32, f32)> = Vec::new();
+        // Touch / left mouse: (0 down, 1 move while held, 2 up, x, y), for drawing a tracking box.
+        let mut touches: Vec<(u8, f32, f32)> = Vec::new();
         for ev in events {
             match ev {
                 Event::Quit { .. } | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => break 'main,
@@ -309,8 +338,20 @@ fn run() -> Result<(), String> {
                     Keycode::Right => actions.push(Action::Nav(Dir::Right)),
                     Keycode::Return => actions.push(Action::Confirm),
                     Keycode::B => actions.push(Action::Bluetooth),
+                    Keycode::P => actions.push(Action::Place),
                     _ => {}
                 },
+                // Touchscreen taps arrive as (synthesised) left clicks, in logical pixels.
+                Event::MouseButtonDown { mouse_btn: sdl2::mouse::MouseButton::Left, x, y, .. } => {
+                    actions_tap.push((x as f32, y as f32));
+                    touches.push((0, x as f32, y as f32));
+                }
+                Event::MouseMotion { mousestate, x, y, .. } if mousestate.left() => {
+                    touches.push((1, x as f32, y as f32));
+                }
+                Event::MouseButtonUp { mouse_btn: sdl2::mouse::MouseButton::Left, x, y, .. } => {
+                    touches.push((2, x as f32, y as f32));
+                }
                 Event::ControllerDeviceAdded { which, .. } => {
                     if let Ok(c) = game_controller.open(which) {
                         println!("controller connected: {}", c.name());
@@ -334,16 +375,87 @@ fn run() -> Result<(), String> {
             actions.push(Action::Nav(d));
         }
 
-        let (settings, calibrating) = {
+        if args.demo_nav {
+            demo::fill(&shared, started.elapsed().as_secs_f32());
+        }
+        let now = Instant::now();
+        let dt = now.duration_since(last_frame).as_secs_f32();
+        last_frame = now;
+        let (settings, mode, robot_xy, track, frame_size) = {
             let s = shared.lock().unwrap();
-            let calibrating = s.state_at.map(|t| t.elapsed().as_secs_f32() < 2.0).unwrap_or(false)
-                && s.state.as_ref().and_then(|st| st.mode.as_ref()).map(|m| m.mode == "calibrate").unwrap_or(false);
-            (s.settings.clone(), calibrating)
+            let fresh = s.state_at.map(|t| t.elapsed().as_secs_f32() < 2.0).unwrap_or(false);
+            let st = s.state.as_ref().filter(|_| fresh);
+            let mode = st.and_then(|st| st.mode.as_ref()).map(|m| m.mode.clone()).unwrap_or_default();
+            let track_fresh = s.track_at.map(|t| t.elapsed().as_secs_f32() < 1.5).unwrap_or(false);
+            let track = s.track.clone().filter(|_| track_fresh);
+            let frame_size = s.frame.as_ref().filter(|f| f.view == View::Color).map(|f| (f.width, f.height));
+            (s.settings.clone(), mode, st.and_then(|st| st.pose.as_ref()).map(|p| (p.x, p.y)), track, frame_size)
         };
+        let calibrating = mode == "calibrate";
+        let auto_nav = mode == "auto_nav";
+        let sentry = mode == "sentry";
+        let tracking = track.as_ref().is_some_and(|t| t.active());
+        // Sentry, on the camera view: touch / D-pad + A pick something to track.
+        let video_rect = frame_size.map(|(w, h)| track::video_rect(w, h));
+        let picking = sentry && view == View::Color && !menu.open && !menu.controls_open && video_rect.is_some();
+        let mut track_cmds: Vec<Option<[f32; 4]>> = Vec::new(); // Some = start on that box, None = stop
+        if let (true, Some(r)) = (picking, video_rect) {
+            for &(kind, x, y) in &touches {
+                match kind {
+                    0 => pick.press(r, x, y),
+                    1 => pick.motion(r, x, y),
+                    _ => {
+                        if let Some(b) = pick.release(r, x, y) {
+                            track_cmds.push(Some(b));
+                        }
+                    }
+                }
+            }
+        } else {
+            pick.cancel_drag();
+        }
+        let mut nav_cmds: Vec<NavCmd> = Vec::new();
+        if auto_nav && !menu.open {
+            nav.update(dt, &pad.state, robot_xy);
+            nav_cmds.extend(actions_tap.iter().filter_map(|&(x, y)| nav.tap(x, y)));
+            nav_cmds.extend(nav.poll(now));
+        } else {
+            nav.reset_pending();
+        }
         for action in actions {
             let change = match action {
-                // L2 picks the joint in calibration mode, so it doesn't switch views then.
-                Action::NextView if calibrating => None,
+                // L2 picks the joint in calibration mode and zooms the auto-nav map,
+                // so it doesn't switch views then.
+                Action::NextView if calibrating || auto_nav => None,
+                Action::Confirm if auto_nav && !menu.open => {
+                    nav.press_a(now);
+                    None
+                }
+                Action::Bluetooth if auto_nav && !menu.open => {
+                    nav_cmds.extend(nav.press_x());
+                    None
+                }
+                Action::Place if auto_nav && !menu.open => {
+                    nav.toggle_place();
+                    None
+                }
+                Action::Nav(d) if auto_nav && !menu.open => {
+                    nav_cmds.extend(nav.dpad(d));
+                    None
+                }
+                Action::Nav(d) if picking => {
+                    pick.nudge(d);
+                    None
+                }
+                Action::Confirm if picking => {
+                    let r = video_rect.unwrap();
+                    track_cmds.push(Some(pick.reticle(r.width() as f32 / r.height() as f32)));
+                    None
+                }
+                Action::Bluetooth if sentry && tracking && !menu.open => {
+                    track_cmds.push(None);
+                    None
+                }
                 Action::NextView => {
                     view = next_view(view, depth_ok);
                     if selftest_dir.is_some() {
@@ -374,6 +486,41 @@ fn run() -> Result<(), String> {
                 }
             }
         }
+        for cmd in nav_cmds {
+            let (sent, what) = match cmd {
+                NavCmd::Goal(x, y) => (commander.nav_goal(x, y), format!("Walking to {x:.1}, {y:.1} m")),
+                NavCmd::Cancel => (commander.nav_cancel(), "Stopping".to_string()),
+                // The new speed shows in the nav panel once the robot has it.
+                NavCmd::Speed(step) => (commander.nav_speed(step), String::new()),
+                NavCmd::Pose(x, y, yaw) => (commander.nav_pose(x, y, yaw), "Placing the robot…".to_string()),
+            };
+            if args.demo_nav {
+                match cmd {
+                    NavCmd::Goal(x, y) => demo::set_goal(&shared, x, y),
+                    NavCmd::Speed(step) => demo::step_speed(step),
+                    NavCmd::Pose(x, y, yaw) => demo::set_pose(x, y, yaw),
+                    NavCmd::Cancel => {}
+                }
+            }
+            if sent || args.demo_nav {
+                if !what.is_empty() {
+                    menu.notify(what, true);
+                }
+            } else {
+                menu.notify("Not connected — not sent".into(), false);
+            }
+        }
+        for cmd in track_cmds {
+            let (sent, what) = match cmd {
+                Some(b) => (commander.track_start(b), "Tracking — X to stop"),
+                None => (commander.track_stop(), "Tracking stopped"),
+            };
+            if sent {
+                menu.notify(what.into(), true);
+            } else {
+                menu.notify("Not connected — not sent".into(), false);
+            }
+        }
         // Results from gait_node (IMU zeroed, calibration done/failed) as toasts.
         // The first note seen is old news, so it only sets the baseline.
         let note = {
@@ -388,7 +535,12 @@ fn run() -> Result<(), String> {
         }
         let acks = std::mem::take(&mut shared.lock().unwrap().acks);
         for ack in &acks {
-            menu.on_ack(ack, &settings);
+            if ack.key == "set_pose" {
+                // Not a setting: the result of placing the robot on the map.
+                menu.notify(if ack.text.is_empty() { "Robot placed".into() } else { ack.text.clone() }, ack.ok);
+            } else {
+                menu.on_ack(ack, &settings);
+            }
         }
         view_atomic.store(view.to_u8(), Ordering::Relaxed);
         // While the settings menu is open the D-pad and A drive the menu only, so
@@ -401,6 +553,17 @@ fn run() -> Result<(), String> {
             }
         }
         *input_shared.lock().unwrap() = sent;
+
+        // Robot mic: whatever arrived since the last frame goes to the speakers.
+        let audio_live = {
+            let mut s = shared.lock().unwrap();
+            let live = s.audio_at.is_some_and(|t| t.elapsed() < Duration::from_millis(500));
+            let samples = std::mem::take(&mut s.audio);
+            let rate = s.audio_rate;
+            drop(s);
+            player.tick(&samples, rate, live);
+            live
+        };
 
         let snap = {
             let s = shared.lock().unwrap();
@@ -415,6 +578,13 @@ fn run() -> Result<(), String> {
                 state_age: age(s.state_at),
                 map: s.map.clone(),
                 map_version: s.map_version,
+                static_map: s.static_map.clone(),
+                static_map_version: s.static_map_version,
+                nav_cam: auto_nav.then(|| nav.clone()),
+                track: track.clone(),
+                track_pick: picking.then(|| pick.clone()),
+                nav_a_pending: nav.a_pending(),
+                audio_live,
                 scan: s.scan.clone(),
                 scan_age: age(s.scan_at),
                 frame: s.frame.clone(),

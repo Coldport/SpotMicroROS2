@@ -38,7 +38,7 @@ def handle_subscribe_logs(data):
     
     def stream_logs():
         try:
-            with open(log_path, 'r') as f:
+            with open(log_path, 'r', encoding='utf-8') as f:
                 f.seek(0, os.SEEK_END)
                 while True:
                     line = f.readline()
@@ -61,6 +61,7 @@ def build_workspace():
         ws_path = find_workspace_root()
         result = subprocess.run(
             ['colcon', 'build', '--symlink-install'],
+            check=False,
             cwd=str(ws_path),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -87,8 +88,8 @@ def launch_node():
         log_path = Path(f"/tmp/{pkg}_{node}.log")
         proc = subprocess.Popen(
             ['bash', '-c', launch_cmd],
-            preexec_fn=os.setsid,
-            stdout=open(log_path, 'w'),
+            start_new_session=True,
+            stdout=open(log_path, 'w', encoding='utf-8'),
             stderr=subprocess.STDOUT,
             env=env
         )
@@ -121,6 +122,7 @@ def stop_node():
         # Fallback to ros2 node info
         result = subprocess.run(
             ['ros2', 'node', 'list'],
+            check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -133,6 +135,7 @@ def stop_node():
                 if full_node_name.endswith(f"/{node_name}") or full_node_name == node_name:
                     info = subprocess.run(
                         ['ros2', 'node', 'info', full_node_name],
+                        check=False,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
@@ -172,6 +175,7 @@ def stop_all_nodes():
 
         result = subprocess.run(
             ['ros2', 'node', 'list'],
+            check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -183,6 +187,7 @@ def stop_all_nodes():
                     continue
                 info = subprocess.run(
                     ['ros2', 'node', 'info', full_node_name],
+                    check=False,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -206,7 +211,7 @@ def stop_all_nodes():
 def stream_logs(pkg, node):
     log_path = Path(f"/tmp/{pkg}_{node}.log")
     def generate():
-        with open(log_path, 'r') as f:
+        with open(log_path, 'r', encoding='utf-8') as f:
             f.seek(0, os.SEEK_END)
             while True:
                 line = f.readline()
@@ -331,6 +336,7 @@ if __name__ == '__main__':
 
 
 
+# pylint: disable-next=pointless-string-statement
 '''def detect_node_type(node_script_path):
     """Try to infer node type from keywords in source."""
     try:
@@ -353,6 +359,7 @@ def check_lifecycle(node_name):
     try:
         result = subprocess.run(
             ['ros2', 'lifecycle', 'get', node_name],
+            check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -396,6 +403,7 @@ def get_running_nodes():
     try:
         result = subprocess.run(
             ['ros2', 'node', 'list'],
+            check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -429,6 +437,7 @@ def get_package_executables(pkg_name):
     try:
         result = subprocess.run(
             ['ros2', 'pkg', 'executables', pkg_name],
+            check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

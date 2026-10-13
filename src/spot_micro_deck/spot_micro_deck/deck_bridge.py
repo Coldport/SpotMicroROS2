@@ -16,6 +16,20 @@ The Deck has no ROS install, so it talks to the robot through a Mosquitto broker
     its parameter services, the bridge's own video settings directly. Accepted
     changes are also written into the params YAML files (gait_params_files /
     bridge_params_files, set by deck.launch.py), so the next launch uses them.
+  * Map actions from the settings menu: clear the SLAM map, or save it into
+    `maps_dir` as map_<date>_<time> — a map_server .pgm/.yaml (the static map)
+    plus slam_toolbox's serialized pose graph (.posegraph/.data, which its
+    localization mode can load). static_map.* symlinks point at the newest save.
+    "Load saved map" hands that pose graph back to slam_toolbox, so SLAM carries
+    on from the saved map (the robot must start where that map was begun).
+  * The robot's mic (the Anker webcam's; audio.py): streamed as mu-law on
+    <prefix>/audio while a Deck is online and the "Robot mic" setting is on.
+  * The saved static map goes to the Deck too (retained), for the auto-nav view.
+  * Auto nav: goals / cancels / speed steps from the Deck go to nav_node
+    (spot_micro_move), and its status comes back in the state message ("nav").
+    "The robot is here" from the Deck reloads the saved pose graph into
+    slam_toolbox with the robot at that pose (START_AT_GIVEN_POSE), so a robot
+    that didn't start where the map was begun can still navigate on it.
 
 Camera and lidar subscriptions only exist while a Deck is online and looking at
 that view, and depth is only colorized/encoded while the depth view is on
@@ -50,12 +64,15 @@ from rclpy.qos import (DurabilityPolicy, QoSProfile, ReliabilityPolicy,
 from rclpy.time import Time
 from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import CompressedImage, Image, Imu, Joy, LaserScan
-from slam_toolbox.srv import Reset
-from std_msgs.msg import Bool, String
+from geometry_msgs.msg import PoseStamped
+from slam_toolbox.srv import DeserializePoseGraph, Reset, SaveMap, SerializePoseGraph
+from std_msgs.msg import Bool, Empty, Int32, String
 
+from spot_micro_deck import audio
 from spot_micro_deck import param_file
 from spot_micro_deck import protocol as P
 from spot_micro_deck import settings as S
+from spot_micro_deck import static_map
 
 try:
     from spot_micro_camera.detect import detect_camera
@@ -128,10 +145,26 @@ class DeckBridge(Node):
         self.declare_parameter('depth_min_m', 0.1)
         self.declare_parameter('depth_max_m', 2.0)
         self.declare_parameter('input_timeout_s', 0.5)
+        # Robot mic -> Deck (audio.py). audio_device: 'auto' (first USB mic, i.e.
+        # the webcam), part of a card's name, or an ALSA device like 'plughw:0,0'.
+        self.declare_parameter('audio_enabled', False)
+        self.declare_parameter('audio_gain_db', 0.0)
+        self.declare_parameter('audio_device', 'auto')
+        self.declare_parameter('audio_rate', 16000)
         # ':'-separated params files to write accepted Deck setting changes into
         # (deck.launch.py fills these in); empty = changes last until restart.
         self.declare_parameter('gait_params_files', '')
         self.declare_parameter('bridge_params_files', '')
+        # Where the Deck's "Save map" writes the SLAM map ('~' is expanded).
+        self.declare_parameter('maps_dir', '~/spotmicro_maps')
+        # Auto nav (spot_micro_move nav_node).
+        self.declare_parameter('nav_goal_topic', '/spotmicro_move/nav_goal')
+        self.declare_parameter('nav_cancel_topic', '/spotmicro_move/nav_cancel')
+        self.declare_parameter('nav_status_topic', '/spotmicro_move/nav_status')
+        self.declare_parameter('nav_speed_topic', '/spotmicro_move/nav_speed')
+        # Sentry object tracking (spot_micro_move track_node).
+        self.declare_parameter('track_cmd_topic', '/spotmicro_track/cmd')
+        self.declare_parameter('track_status_topic', '/spotmicro_track/status')
 
         p = self.get_parameter
         self._t = P.topics(p('topic_prefix').value)
@@ -199,6 +232,23 @@ class DeckBridge(Node):
         self.add_on_set_parameters_callback(self._on_own_params)
 
         self._slam_reset = self.create_client(Reset, '/slam_toolbox/reset')
+        self._slam_save = self.create_client(SaveMap, '/slam_toolbox/save_map')
+        self._slam_serialize = self.create_client(SerializePoseGraph, '/slam_toolbox/serialize_map')
+        self._slam_load = self.create_client(DeserializePoseGraph, '/slam_toolbox/deserialize_map')
+        self._maps_dir = os.path.expanduser(p('maps_dir').value)
+        self._saving_map = False
+        self._static_map_payload = self._load_static_map()
+
+        self._nav_goal_pub = self.create_publisher(PoseStamped, p('nav_goal_topic').value, 10)
+        self._nav_cancel_pub = self.create_publisher(Empty, p('nav_cancel_topic').value, 10)
+        self._nav_speed_pub = self.create_publisher(Int32, p('nav_speed_topic').value, 10)
+        self._nav = None               # nav_node's status message (dict)
+        self.create_subscription(
+            String, p('nav_status_topic').value, self._on_nav_status,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                       reliability=ReliabilityPolicy.RELIABLE))
+        self._track_cmd_pub = self.create_publisher(String, p('track_cmd_topic').value, 10)
+        self.create_subscription(String, p('track_status_topic').value, self._on_track_status, 10)
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
@@ -217,6 +267,12 @@ class DeckBridge(Node):
             String, p('mode_topic').value, self._on_mode,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                        reliability=ReliabilityPolicy.RELIABLE))
+
+        self._mic = None               # audio.MicStream while streaming
+        self._mic_exit = None          # why ffmpeg stopped by itself (set from its thread)
+        self._mic_retry_at = 0.0
+        self._mic_reported = ''        # last mic problem told to the Deck (once per try)
+        self._audio_seq = 0
 
         self._connected_pub.publish(Bool(data=False))
         self._setup_mqtt()
@@ -259,10 +315,12 @@ class DeckBridge(Node):
             return
         self.get_logger().info('Connected to MQTT broker.')
         client.subscribe([(self._t['deck_online'], 1), (self._t['deck_view'], 0),
-                          (self._t['deck_input'], 0), (self._t['deck_set'], 1)])
+                          (self._t['deck_input'], 0), (self._t['deck_set'], 1),
+                          (self._t['deck_nav'], 1), (self._t['deck_track'], 1)])
         client.publish(self._t['robot_online'], '1', qos=1, retain=True)
         if self._map_payload is not None:
             client.publish(self._t['map'], self._map_payload, qos=1, retain=True)
+        client.publish(self._t['static_map'], self._static_map_payload, qos=1, retain=True)
 
     def _on_mqtt_disconnect(self, _client, _userdata, rc):
         if rc != 0:
@@ -278,6 +336,10 @@ class DeckBridge(Node):
                 key, value = P.decode_set(msg.payload)
                 with self._lock:
                     self._set_queue.append((key, value))
+            elif msg.topic == self._t['deck_nav']:
+                self._handle_nav(P.decode_nav(msg.payload))
+            elif msg.topic == self._t['deck_track']:
+                self._handle_track(P.decode_track(msg.payload))
             elif msg.topic == self._t['deck_online']:
                 self._handle_deck_online(msg.payload.decode('utf-8', 'replace').strip() == '1')
         except Exception as exc:   # never let a bad message kill the MQTT thread
@@ -291,6 +353,40 @@ class DeckBridge(Node):
             self._input_stale = False
         self._counts['input'] += 1
         self._publish_joy(axes, buttons)
+
+    def _handle_nav(self, cmd):
+        if cmd[0] == 'cancel':
+            self._nav_cancel_pub.publish(Empty())
+            return
+        if cmd[0] == 'speed':
+            self._nav_speed_pub.publish(Int32(data=cmd[1]))
+            return
+        if cmd[0] == 'pose':
+            self._set_robot_pose(*cmd[1:])
+            return
+        goal = PoseStamped()
+        goal.header.frame_id = self._map_frame
+        goal.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.position.x, goal.pose.position.y = cmd[1], cmd[2]
+        goal.pose.orientation.w = 1.0
+        self._nav_goal_pub.publish(goal)
+
+    def _handle_track(self, cmd):
+        out = {'cmd': 'stop'} if cmd[0] == 'stop' else {'cmd': 'start', 'box': cmd[1]}
+        self._track_cmd_pub.publish(String(data=json.dumps(out, separators=(',', ':'))))
+
+    def _on_track_status(self, msg):
+        # Small and only frequent while tracking: straight through, for the Deck's box overlay.
+        if self._deck_active():
+            self._mqtt.publish(self._t['track'], msg.data, qos=0)
+
+    def _on_nav_status(self, msg):
+        try:
+            nav = json.loads(msg.data)
+        except ValueError:
+            return
+        if isinstance(nav, dict):
+            self._nav = nav
 
     def _handle_view(self, name):
         if name not in P.VIEW_NAMES:
@@ -346,6 +442,7 @@ class DeckBridge(Node):
 
     def _reconcile_subscriptions(self):
         active = self._deck_active()
+        self._reconcile_mic(active)
         with self._lock:
             view = self._view
         wanted = {
@@ -366,6 +463,59 @@ class DeckBridge(Node):
                 self._subs[name] = factories[name]()
             elif not want and name in self._subs:
                 self.destroy_subscription(self._subs.pop(name))
+
+    def _reconcile_mic(self, active):
+        """Run the mic while a Deck is online and wants it; restart it when the
+        gain changes; after a failure, retry every few seconds (telling the
+        Deck why once, not every time)."""
+        want = active and bool(self.get_parameter('audio_enabled').value)
+        gain = float(self.get_parameter('audio_gain_db').value)
+        now = time.monotonic()
+        with self._lock:
+            exited, self._mic_exit = self._mic_exit, None
+        if exited and self._mic is not None:
+            self._mic = None
+            self._mic_failed(exited, now)
+        if self._mic is not None and (not want or self._mic.gain_db != gain):
+            self._mic.stop()
+            self._mic = None
+            if not want:
+                self.get_logger().info('Robot mic off.')
+        if not want:
+            self._mic_reported = ''
+            self._mic_retry_at = 0.0
+            return
+        if self._mic is not None or now < self._mic_retry_at:
+            return
+        try:
+            device = audio.find_device(self.get_parameter('audio_device').value)
+            audio.check_access(device)
+            mic = audio.MicStream(device, self._on_mic_chunk, self._on_mic_exit,
+                                  rate=int(self.get_parameter('audio_rate').value), gain_db=gain)
+            mic.start()
+        except audio.AudioError as exc:
+            self._mic_failed(str(exc), now)
+            return
+        self._mic = mic
+        self.get_logger().info(f'Robot mic on: {device}, {mic.rate} Hz mu-law, gain {gain:g} dB.')
+
+    def _mic_failed(self, reason, now):
+        self._mic_retry_at = now + 5.0
+        if reason != self._mic_reported:
+            self._mic_reported = reason
+            self.get_logger().warn(f'Robot mic: {reason}')
+            self._ack('audio_enabled', False, True, reason)
+
+    def _on_mic_chunk(self, data):
+        # From the mic's reader thread; paho's publish is thread-safe.
+        mic = self._mic
+        rate = mic.rate if mic is not None else 16000
+        self._audio_seq += 1
+        self._mqtt.publish(self._t['audio'], P.pack_audio(self._audio_seq, rate, data), qos=0)
+
+    def _on_mic_exit(self, reason):
+        with self._lock:
+            self._mic_exit = reason
 
     # ── ROS -> MQTT ──────────────────────────────────────────────────────────
 
@@ -664,6 +814,12 @@ class DeckBridge(Node):
         if key == 'clear_map':
             self._clear_map()
             return
+        if key == 'save_map':
+            self._save_map()
+            return
+        if key == 'load_map':
+            self._load_map_into_slam()
+            return
         if key != 'shutdown':
             self._ack(key, False, True, 'not implemented')
             return
@@ -676,7 +832,7 @@ class DeckBridge(Node):
 
         def poweroff():
             try:
-                result = subprocess.run(_SHUTDOWN_CMD, capture_output=True, text=True, timeout=15)
+                result = subprocess.run(_SHUTDOWN_CMD, capture_output=True, check=False, text=True, timeout=15)
                 err = result.stderr.strip() if result.returncode else ''
             except (OSError, subprocess.SubprocessError) as exc:
                 err = str(exc)
@@ -699,6 +855,130 @@ class DeckBridge(Node):
         self._slam_reset.call_async(Reset.Request()).add_done_callback(done)
         self.get_logger().info('Deck: clearing the SLAM map.')
 
+    def _save_map(self):
+        key = 'save_map'
+        if not (self._slam_save.service_is_ready() and self._slam_serialize.service_is_ready()):
+            self._ack(key, False, True, 'SLAM not running (hold L1+R1 to start the stack)')
+            return
+        if self._saving_map:
+            self._ack(key, False, True, 'already saving')
+            return
+        try:
+            os.makedirs(self._maps_dir, exist_ok=True)
+        except OSError as exc:
+            self._ack(key, False, True, f'cannot create {self._maps_dir}: {exc}')
+            return
+        name = time.strftime('map_%Y%m%d_%H%M%S')
+        base = os.path.join(self._maps_dir, name)
+        self._saving_map = True
+
+        def fail(text):
+            self._saving_map = False
+            self._ack(key, False, True, text)
+
+        # slam_toolbox's save_map shells out to nav2's map_saver_cli (.pgm + .yaml);
+        # serialize_map writes the pose graph. Image first: it's what the Deck shows.
+        def serialized(future):
+            if future.exception() is not None or future.result().result != 0:
+                fail(f'map image saved, pose graph failed: {future.exception() or "write error"}')
+                return
+            for ext in ('.yaml', '.pgm', '.posegraph', '.data'):
+                link = os.path.join(self._maps_dir, 'static_map' + ext)
+                try:
+                    if os.path.lexists(link):
+                        os.remove(link)
+                    os.symlink(name + ext, link)
+                except OSError as exc:
+                    self.get_logger().warn(f'Could not link {link}: {exc}')
+            self._saving_map = False
+            self._static_map_payload = self._load_static_map()
+            self._mqtt.publish(self._t['static_map'], self._static_map_payload, qos=1, retain=True)
+            self._ack(key, True, True, f'Map saved: {name}')
+            self.get_logger().info(f'Deck: saved the SLAM map to {base}.*')
+
+        def saved(future):
+            if future.exception() is not None:
+                fail(f'save failed: {future.exception()}')
+                return
+            if future.result().result != 0 or not os.path.isfile(base + '.yaml'):
+                fail('save failed: no map yet' if future.result().result == 1 else 'save failed')
+                return
+            self._slam_serialize.call_async(
+                SerializePoseGraph.Request(filename=base)).add_done_callback(serialized)
+
+        req = SaveMap.Request()
+        req.name.data = base
+        self._slam_save.call_async(req).add_done_callback(saved)
+        self.get_logger().info(f'Deck: saving the SLAM map to {base}.*')
+
+    def _static_map_base(self):
+        return os.path.join(self._maps_dir, 'static_map')
+
+    def _load_static_map(self):
+        """The newest saved map as a <prefix>/static_map payload (b'' if none)."""
+        path = self._static_map_base() + '.yaml'
+        if not os.path.exists(path):
+            return b''
+        try:
+            w, h, res, ox, oy, cells = static_map.load(path)
+        except static_map.MapLoadError as exc:
+            self.get_logger().warn(f'Saved map not loaded: {exc}')
+            return b''
+        self.get_logger().info(f'Static map for the Deck: {os.path.realpath(path)} ({w}x{h})')
+        return P.pack_map(w, h, res, ox, oy, zlib.compress(cells.tobytes(), 6))
+
+    def _load_map_into_slam(self):
+        key = 'load_map'
+        base = self._static_map_base()
+        if not os.path.exists(base + '.posegraph'):
+            self._ack(key, False, True, 'no saved map yet (Map > Save map first)')
+            return
+        if not self._slam_load.service_is_ready():
+            self._ack(key, False, True, 'SLAM not running (hold L1+R1 to start the stack)')
+            return
+        if self._gait_running and self._mode and self._mode.get('mode') == 'auto_nav':
+            self._ack(key, False, True, 'leave auto nav first (double-tap A)')
+            return
+        req = DeserializePoseGraph.Request()
+        req.filename = os.path.realpath(base + '.posegraph')[:-len('.posegraph')]
+        req.match_type = DeserializePoseGraph.Request.START_AT_FIRST_NODE
+
+        def done(future):
+            ok = future.exception() is None
+            self._ack(key, ok, True, 'Saved map loaded — SLAM continues from it'
+                      if ok else f'load failed: {future.exception()}')
+
+        self._slam_load.call_async(req).add_done_callback(done)
+        self.get_logger().info(f'Deck: loading {req.filename} into slam_toolbox.')
+
+    def _set_robot_pose(self, x, y, yaw):
+        """Reload the saved pose graph with the robot at (x, y, yaw) in the map
+        frame. slam_toolbox scan-matches the first scan near that pose, so it
+        only has to be roughly right. Stops any nav goal first: the map -> odom
+        transform jumps."""
+        key = 'set_pose'
+        base = self._static_map_base()
+        if not os.path.exists(base + '.posegraph'):
+            self._ack(key, False, None, 'no saved map to place the robot on (Map > Save map first)')
+            return
+        if not self._slam_load.service_is_ready():
+            self._ack(key, False, None, 'SLAM not running (hold L1+R1 to start the stack)')
+            return
+        self._nav_cancel_pub.publish(Empty())
+        req = DeserializePoseGraph.Request()
+        req.filename = os.path.realpath(base + '.posegraph')[:-len('.posegraph')]
+        req.match_type = DeserializePoseGraph.Request.START_AT_GIVEN_POSE
+        req.initial_pose.x, req.initial_pose.y, req.initial_pose.theta = x, y, yaw
+        where = f'{x:.1f}, {y:.1f} m facing {math.degrees(yaw):.0f}°'
+
+        def done(future):
+            ok = future.exception() is None
+            self._ack(key, ok, [round(x, 3), round(y, 3), round(yaw, 3)],
+                      f'Robot placed at {where}' if ok else f'placing failed: {future.exception()}')
+
+        self._slam_load.call_async(req).add_done_callback(done)
+        self.get_logger().info(f'Deck: robot is at {where}; loading {req.filename} into slam_toolbox there.')
+
     # ── state summary ────────────────────────────────────────────────────────
 
     def _lookup_pose(self):
@@ -714,7 +994,7 @@ class DeckBridge(Node):
     @staticmethod
     def _read_cpu_temp_c():
         try:
-            with open('/sys/class/thermal/thermal_zone0/temp') as f:
+            with open('/sys/class/thermal/thermal_zone0/temp', encoding='utf-8') as f:
                 return round(int(f.read().strip()) / 1000.0, 1)
         except (OSError, ValueError):
             return None
@@ -749,6 +1029,7 @@ class DeckBridge(Node):
             # Forwarded disarmed too: by-hand IMU calibration runs then, and the
             # mode message carries result notes ("IMU zeroed"). The Deck hides "walk".
             'mode': self._mode if self._gait_running else None,
+            'nav': self._nav if self._gait_running else None,
             'rates': self._rates,
             'depth_range_m': [round(self._depth_min_mm / 1000.0, 2), round(self._depth_max_mm / 1000.0, 2)],
             'sys': {'cpu_temp_c': self._read_cpu_temp_c(), 'load1': round(os.getloadavg()[0], 2)},
@@ -764,6 +1045,8 @@ class DeckBridge(Node):
                            qos=0)
 
     def shutdown(self):
+        if self._mic is not None:
+            self._mic.stop()
         self.save_settings()
         self._publish_neutral_joy()
         if self._mqtt.is_connected():

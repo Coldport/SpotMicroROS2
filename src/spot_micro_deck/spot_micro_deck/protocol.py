@@ -15,10 +15,16 @@ Robot -> Deck
   <p>/map            retained; u16 width, u16 height, f32 resolution (m/cell),
                      f32 origin_x, f32 origin_y, then zlib(int8 occupancy,
                      width*height, row 0 = lowest y; -1 unknown, 0..100 occupied).
+  <p>/static_map    retained; the saved map (maps_dir/static_map.yaml, see
+                     deck_bridge), same layout as <p>/map. Empty payload = none saved.
   <p>/scan           f32 angle_min, f32 angle_increment, f32 range_max, u16 count,
                      then count * u16 range in millimetres (0xFFFF = no return).
                      Angles are in the robot base frame (the bridge applies the laser's
                      yaw from TF), counter-clockwise from +x = front.
+  <p>/audio          the robot's mic, while a Deck is online and the "Robot mic"
+                     setting (audio_enabled) is on: u8 codec (1 = G.711 mu-law,
+                     1 byte per sample, mono), u16 sample rate, u32 sequence
+                     number (gaps = lost chunks), then the samples (~40 ms each).
   <p>/state          JSON object, ~5 Hz (see DeckBridge._build_state). Includes
                      "camera" (which camera is plugged in / streaming) and
                      "gait" (gait_node running / armed) and, while armed,
@@ -29,6 +35,10 @@ Robot -> Deck
                      The Deck's settings menu is drawn from this alone.
   <p>/settings/ack   JSON reply to each deck/set:
                        {"key": "step_height", "ok": true, "value": 40.0, "text": ""}
+  <p>/track          JSON, sentry object tracking status, as track_node publishes
+                     it (spot_micro_move/track_node.py), on every tracked frame:
+                       {"state": "tracking", "box": [x, y, w, h], "err_deg": [yaw, pitch], "seq": 7}
+                     box is normalised 0..1 in the camera image (x, y = top-left).
 
 Deck -> Robot
   <p>/deck/online    "1"/"0", retained; the Deck's last-will is "0".
@@ -39,11 +49,25 @@ Deck -> Robot
                        {"seq": 12, "axes": [lx, ly, rx, ry, l2, r2],
                         "buttons": ["a", "l1"]}          (names of pressed buttons)
   <p>/deck/set       JSON, change one setting: {"key": "step_height", "value": 40.0}
+  <p>/deck/nav       JSON, auto nav (gait_node must be in auto_nav mode):
+                       {"cmd": "goal", "x": 1.25, "y": -0.5}   (map frame, metres)
+                       {"cmd": "cancel"}
+                       {"cmd": "speed", "step": 1}             (+1 / -1: next speed level)
+                       {"cmd": "pose", "x": 1.0, "y": 2.0, "yaw": 1.57}
+                         "the robot is here": reloads the saved map into SLAM
+                         with the robot at that pose (map frame, yaw in rad
+                         counter-clockwise from +x); the result comes back on
+                         <p>/settings/ack with key "set_pose".
+                     Progress comes back in <p>/state "nav" (nav_node's status).
+  <p>/deck/track     JSON, sentry object tracking (normalised image box, see <p>/track):
+                       {"cmd": "start", "box": [0.4, 0.3, 0.2, 0.25]}
+                       {"cmd": "stop"}
 
 All binary fields are little endian.
 """
 
 import json
+import math
 import struct
 
 DEFAULT_PREFIX = 'spotmicro'
@@ -74,6 +98,8 @@ AXIS_NAMES = ['left_x', 'left_y', 'right_x', 'right_y', 'l2', 'r2']
 
 _MAP_HEADER = struct.Struct('<HHfff')
 _SCAN_HEADER = struct.Struct('<fffH')
+_AUDIO_HEADER = struct.Struct('<BHI')
+AUDIO_MULAW = 1
 
 
 class ProtocolError(Exception):
@@ -87,7 +113,9 @@ def topics(prefix=DEFAULT_PREFIX):
         'video_color': f'{p}/video/color',
         'video_depth': f'{p}/video/depth',
         'map': f'{p}/map',
+        'static_map': f'{p}/static_map',
         'scan': f'{p}/scan',
+        'audio': f'{p}/audio',
         'state': f'{p}/state',
         'settings': f'{p}/settings',
         'settings_ack': f'{p}/settings/ack',
@@ -95,6 +123,9 @@ def topics(prefix=DEFAULT_PREFIX):
         'deck_view': f'{p}/deck/view',
         'deck_input': f'{p}/deck/input',
         'deck_set': f'{p}/deck/set',
+        'deck_nav': f'{p}/deck/nav',
+        'deck_track': f'{p}/deck/track',
+        'track': f'{p}/track',
     }
 
 
@@ -113,6 +144,17 @@ def pack_scan(angle_min, angle_increment, range_max, ranges_mm_le):
     """ranges_mm_le: bytes of little-endian u16 millimetre ranges."""
     return _SCAN_HEADER.pack(angle_min, angle_increment, range_max,
                              len(ranges_mm_le) // 2) + ranges_mm_le
+
+
+def pack_audio(seq, rate, mulaw, codec=AUDIO_MULAW):
+    return _AUDIO_HEADER.pack(codec, rate, seq & 0xFFFFFFFF) + mulaw
+
+
+def unpack_audio(payload):
+    """-> (codec, rate, seq, samples)"""
+    if len(payload) < _AUDIO_HEADER.size:
+        raise ProtocolError('audio payload too short')
+    return _AUDIO_HEADER.unpack_from(payload) + (payload[_AUDIO_HEADER.size:],)
 
 
 def unpack_scan(payload):
@@ -138,6 +180,53 @@ def decode_set(payload):
         return str(msg['key']), msg['value']
     except (ValueError, KeyError, TypeError) as exc:
         raise ProtocolError(f'bad set message: {exc}') from exc
+
+
+def decode_nav(payload):
+    """-> ('goal', x, y), ('cancel',), ('speed', +1 | -1) or ('pose', x, y, yaw)
+    from a deck/nav message."""
+    try:
+        msg = json.loads(payload)
+        cmd = msg['cmd']
+        if cmd == 'cancel':
+            return ('cancel',)
+        if cmd == 'goal':
+            x, y = float(msg['x']), float(msg['y'])
+            if not (math.isfinite(x) and math.isfinite(y)):
+                raise ValueError('non-finite goal')
+            return ('goal', x, y)
+        if cmd == 'speed':
+            step = msg['step']
+            if step not in (1, -1) or isinstance(step, bool):
+                raise ValueError('speed step must be 1 or -1')
+            return ('speed', int(step))
+        if cmd == 'pose':
+            x, y, yaw = float(msg['x']), float(msg['y']), float(msg['yaw'])
+            if not all(math.isfinite(v) for v in (x, y, yaw)):
+                raise ValueError('non-finite pose')
+            return ('pose', x, y, yaw)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ProtocolError(f'bad nav message: {exc}') from exc
+    raise ProtocolError(f'unknown nav command "{cmd}"')
+
+
+def decode_track(payload):
+    """-> ('start', [x, y, w, h]) or ('stop',) from a deck/track message."""
+    try:
+        msg = json.loads(payload)
+        cmd = msg['cmd']
+        if cmd == 'stop':
+            return ('stop',)
+        if cmd == 'start':
+            box = [float(v) for v in msg['box']]
+            if len(box) != 4 or not all(math.isfinite(v) for v in box):
+                raise ValueError('box must be 4 finite numbers')
+            if box[2] <= 0.0 or box[3] <= 0.0:
+                raise ValueError('box must have a size')
+            return ('start', box)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ProtocolError(f'bad track message: {exc}') from exc
+    raise ProtocolError(f'unknown track command "{cmd}"')
 
 
 def decode_input(payload):

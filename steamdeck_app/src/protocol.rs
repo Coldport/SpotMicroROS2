@@ -12,6 +12,8 @@ pub const BUTTON_NAMES: [&str; 21] = [
     "dpad_left", "dpad_right", "paddle1", "paddle2", "paddle3", "paddle4", "l2", "r2",
 ];
 pub const BTN_A: usize = 0;
+pub const BTN_L1: usize = 4;
+pub const BTN_R1: usize = 5;
 pub const BTN_DPAD_UP: usize = 11;
 pub const BTN_DPAD_DOWN: usize = 12;
 pub const BTN_DPAD_LEFT: usize = 13;
@@ -24,6 +26,8 @@ pub struct Topics {
     pub video_color: String,
     pub video_depth: String,
     pub map: String,
+    pub static_map: String,
+    pub audio: String,
     pub scan: String,
     pub state: String,
     pub settings: String,
@@ -32,6 +36,9 @@ pub struct Topics {
     pub deck_view: String,
     pub deck_input: String,
     pub deck_set: String,
+    pub deck_nav: String,
+    pub deck_track: String,
+    pub track: String,
 }
 
 impl Topics {
@@ -43,6 +50,8 @@ impl Topics {
             video_color: t("video/color"),
             video_depth: t("video/depth"),
             map: t("map"),
+            static_map: t("static_map"),
+            audio: t("audio"),
             scan: t("scan"),
             state: t("state"),
             settings: t("settings"),
@@ -51,6 +60,9 @@ impl Topics {
             deck_view: t("deck/view"),
             deck_input: t("deck/input"),
             deck_set: t("deck/set"),
+            deck_nav: t("deck/nav"),
+            deck_track: t("deck/track"),
+            track: t("track"),
         }
     }
 }
@@ -100,6 +112,19 @@ pub fn parse_map(payload: &[u8]) -> Result<MapData, String> {
     })
 }
 
+pub const AUDIO_MULAW: u8 = 1;
+
+/// <p>/audio: u8 codec, u16 sample rate, u32 sequence number, then the samples.
+/// -> (codec, rate, seq, samples)
+pub fn parse_audio(payload: &[u8]) -> Result<(u8, u16, u32, &[u8]), String> {
+    if payload.len() < 7 {
+        return Err("audio payload too short".into());
+    }
+    let rate = u16::from_le_bytes([payload[1], payload[2]]);
+    let seq = u32::from_le_bytes([payload[3], payload[4], payload[5], payload[6]]);
+    Ok((payload[0], rate, seq, &payload[7..]))
+}
+
 pub fn parse_scan(payload: &[u8]) -> Result<ScanData, String> {
     if payload.len() < 14 {
         return Err("scan payload too short".into());
@@ -131,6 +156,39 @@ pub fn encode_input(seq: u32, axes: &[f32; 6], pressed: &[bool; 21]) -> String {
 /// deck/set: change one robot setting.
 pub fn encode_set(key: &str, value: &serde_json::Value) -> String {
     serde_json::json!({ "key": key, "value": value }).to_string()
+}
+
+/// deck/nav: walk to (x, y) in the map frame (auto nav mode only).
+pub fn encode_nav_goal(x: f32, y: f32) -> String {
+    let r = |v: f32| ((v * 1000.0).round() / 1000.0) as f64;
+    serde_json::json!({ "cmd": "goal", "x": r(x), "y": r(y) }).to_string()
+}
+
+/// deck/nav: stop and forget the goal.
+pub fn encode_nav_cancel() -> String {
+    serde_json::json!({ "cmd": "cancel" }).to_string()
+}
+
+/// deck/nav: one speed level up (+1) or down (-1).
+pub fn encode_nav_speed(step: i32) -> String {
+    serde_json::json!({ "cmd": "speed", "step": step.signum() }).to_string()
+}
+
+/// deck/nav: the robot is at (x, y) facing `yaw` (map frame, rad CCW from +x).
+pub fn encode_nav_pose(x: f32, y: f32, yaw: f32) -> String {
+    let r = |v: f32| (v as f64 * 1000.0).round() / 1000.0;
+    serde_json::json!({ "cmd": "pose", "x": r(x), "y": r(y), "yaw": r(yaw) }).to_string()
+}
+
+/// deck/track: follow what's in this box (normalised camera-image x, y, w, h; sentry only).
+pub fn encode_track_start(b: [f32; 4]) -> String {
+    let r = |v: f32| (v as f64 * 10000.0).round() / 10000.0;
+    serde_json::json!({ "cmd": "start", "box": [r(b[0]), r(b[1]), r(b[2]), r(b[3])] }).to_string()
+}
+
+/// deck/track: stop following.
+pub fn encode_track_stop() -> String {
+    serde_json::json!({ "cmd": "stop" }).to_string()
 }
 
 #[cfg(test)]
@@ -174,6 +232,31 @@ mod tests {
             encode_set("step_height", &serde_json::json!(45.0)),
             r#"{"key":"step_height","value":45.0}"#
         );
+    }
+
+    #[test]
+    fn audio_matches_python_packer() {
+        // protocol.py: pack_audio(7, 16000, b'\x01\xff\x7f')
+        let p = unhex("01803e0700000001ff7f");
+        assert_eq!(parse_audio(&p).unwrap(), (AUDIO_MULAW, 16000, 7, &[0x01u8, 0xff, 0x7f][..]));
+        assert!(parse_audio(&p[..5]).is_err());
+        assert_eq!(Topics::new("spotmicro").audio, "spotmicro/audio");
+    }
+
+    #[test]
+    fn nav_matches_python_decoder() {
+        assert_eq!(encode_nav_goal(1.25, -0.5), r#"{"cmd":"goal","x":1.25,"y":-0.5}"#);
+        assert_eq!(encode_nav_cancel(), r#"{"cmd":"cancel"}"#);
+        assert_eq!(encode_nav_speed(-3), r#"{"cmd":"speed","step":-1}"#);
+        assert_eq!(encode_nav_pose(1.0, -2.5, 1.5708), r#"{"cmd":"pose","x":1.0,"y":-2.5,"yaw":1.571}"#);
+    }
+
+    #[test]
+    fn track_matches_python_decoder() {
+        assert_eq!(encode_track_start([0.1, 0.25, 0.3, 0.4]), r#"{"box":[0.1,0.25,0.3,0.4],"cmd":"start"}"#);
+        assert_eq!(encode_track_stop(), r#"{"cmd":"stop"}"#);
+        let t = Topics::new("spotmicro");
+        assert_eq!((t.deck_track.as_str(), t.track.as_str()), ("spotmicro/deck/track", "spotmicro/track"));
     }
 
     #[test]

@@ -1,0 +1,30 @@
+# Pylint config for CI (.github/workflows/pylint.yml).
+#
+# CI runs on a plain Ubuntu runner without ROS, numpy, OpenCV or the servo
+# libraries, and pylint fails the job on ANY message. So this keeps the checks
+# that catch real bugs (errors, fatal, warnings) and drops the style-only ones.
+
+[MAIN]
+# colcon-generated helpers that were committed by mistake.
+ignore-paths=.*/install/.*
+
+# Resolved at runtime by ROS / C extensions; pylint can't see their members.
+ignored-modules=rclpy,tf2_ros,cv2,launch,launch_ros
+
+[MESSAGES CONTROL]
+disable=
+    # Convention and refactor categories: docstrings, naming, line length,
+    # too-many-* complexity counts. Style only.
+    C,
+    R,
+    # Dependencies (ROS, numpy, cv2, Adafruit, flask) aren't installed in CI.
+    import-error,
+    no-name-in-module,
+    # Nodes deliberately catch everything so one bad message or a hardware
+    # hiccup can't kill the node that's driving the servos.
+    broad-exception-caught,
+    # ROS callbacks have fixed signatures (request/response, msg), and the
+    # trick keyframe functions share one signature.
+    unused-argument,
+    # Every pytest fixture used as an argument triggers this.
+    redefined-outer-name,

@@ -108,6 +108,21 @@ trimmed with `level_trim_roll` / `level_trim_pitch`. If the IMU goes quiet the
 correction bleeds back to zero. The current IMU roll/pitch is logged on arming
 so the signs/trim can be checked.
 
+WALKING STABILISATION: with `level_enabled` and `walk_stab_enabled`, walking
+also uses the IMU beyond the slow leveling integral:
+  * the integral follows a low-passed tilt (`walk_level_filter_s`) while
+    walking, so it doesn't chase the rock of every step;
+  * a fast PD term (`walk_level_kp` on tilt, `walk_level_kd` on the gyro rate)
+    adds to the leveling height offsets, mostly on the planted feet (a raised
+    foot takes less of it, so its ground clearance is kept);
+  * the body leans away from the side it is tipping toward
+    (`walk_com_gain` mm/deg, clamped to `walk_com_max`), even with body sway off;
+  * past `walk_tilt_slow_deg` of filtered tilt the steps slow down, to
+    `walk_min_speed` of the normal rate at `walk_tilt_stop_deg`;
+  * walking with the turn stick centred holds the IMU heading
+    (`walk_heading_gain` turn per rad of drift, clamped to `walk_heading_max`;
+    same turn sign as `cmd_vel_turn_sign`).
+
 MODES (armed only; `mode_topic`, a latched std_msgs/String of JSON, says which
 one is active — deck_bridge forwards it to the Deck):
   walk       the default, as above.
@@ -116,6 +131,13 @@ one is active — deck_bridge forwards it to the Deck):
              roll, left stick Y = pitch, right stick X = yaw, up to
              `sentry_max_{roll,pitch,yaw}_deg`, slewed at `sentry_rate_deg_s`.
              R1/L1 still raise/lower it. IMU leveling holds its last correction.
+             OBJECT TRACKING: pick something on the Deck's camera view (touch
+             and drag a box, or D-pad + A); track_node follows it in the color
+             stream and publishes its angle off-centre on `track_topic`. While
+             it is locked on, yaw and pitch turn the camera toward it at
+             `track_gain` deg/s per deg of error (outside `track_deadband_deg`),
+             within the sentry limits and rate; roll stays on the left stick.
+             X on the Deck stops tracking; leaving sentry stops it too.
   calibrate  hold `calib_buttons` (default y + dpad_up) for `calib_hold_s`
              (3s) to enter or leave. The feet go to `calib_pose` (IK x, y, z —
              the pose the calibration file was verified at: feet under the
@@ -127,12 +149,33 @@ one is active — deck_bridge forwards it to the Deck):
              including by disarming or estop — writes the offsets into
              `calibration_path` (servo_calibration.yaml; servo_calibration.txt
              is not touched).
+             ANGLE TEST: A sends the selected joint to a set servo angle
+             (before the offset; it starts where IK has the joint) and A again
+             returns it. Right stick up/down changes that angle by
+             `calib_angle_step_deg`, right/left by `calib_angle_fine_deg`; the
+             joint slews there at `calib_angle_speed_deg_s`. Then use the
+             D-pad to change the offset until the joint really sits at that
+             angle (e.g. square to the body at 90). Best done with the robot
+             on a stand: one joint moving tips a standing robot.
   trick      a scripted move (spot_micro_move/tricks.py), started from walk:
              tap `trick_button` (default x) once / twice / three times for
              `trick_taps` (butt shake, dance, push-ups), or hold X and press a
              D-pad direction for `trick_dpad` (up: handshake, down: sit,
              left: bow, right: pee). The robot glides to its stand pose,
              plays it, and goes back to walk. Press X again to stop early.
+  auto_nav   double-tap `nav_button` (default a) to enter or leave. The robot
+             walks itself to a point picked on the Deck's map: nav_node
+             (this package) plans the route and publishes `cmd_vel_topic`
+             (geometry_msgs/Twist: linear.x forward m/s, angular.z turn-left
+             rad/s; linear.y is ignored, auto nav never walks sideways), which
+             this node turns into strides — the inverse of the ODOMETRY
+             estimate below, so `odom_scale` calibrates both. cmd_vel older
+             than `cmd_vel_timeout_s` counts as stop. The left stick still
+             drives by hand (up/down walks, left/right turns — no strafing)
+             and overrides cmd_vel while pushed; the right stick, D-pad and L1/R1/
+             L2/R2 drive the Deck's map view, so height, sentry, tricks, IMU
+             zero / calibration are off until you leave. `cmd_vel_turn_sign`
+             flips the turn if the robot turns the wrong way for a +angular.z.
   imu_calib  hold `imu_calib_buttons` (default y + dpad_left) for
              `imu_chord_hold_s` (1s) to start (again to cancel): works out how
              the IMU is mounted, so roll/pitch come out on the right axes with
@@ -167,7 +210,7 @@ from rclpy.node import Node
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.qos import (DurabilityPolicy, QoSProfile, ReliabilityPolicy,
                        qos_profile_sensor_data)
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, Twist
 from sensor_msgs.msg import Imu, Joy
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
@@ -195,7 +238,7 @@ GAITS = {
 LEFT_SIDE = {"FL", "RL"}   # sign convention for the turn approximation below
 FRONT = {"FL", "FR"}
 LEGS = ('FL', 'FR', 'RL', 'RR')
-MODES = ('walk', 'sentry', 'calibrate', 'trick', 'imu_calib')
+MODES = ('walk', 'sentry', 'calibrate', 'trick', 'imu_calib', 'auto_nav')
 DPAD = ('dpad_up', 'dpad_down', 'dpad_left', 'dpad_right')
 # IMU axis calibration steps, in order; 'return' only when armed.
 IMU_CAL_STEPS = ('level', 'left', 'right', 'front', 'back', 'return')
@@ -217,6 +260,11 @@ LIVE_PARAMS = frozenset([
     'level_half_length', 'level_half_width',
     'sentry_max_roll_deg', 'sentry_max_pitch_deg', 'sentry_max_yaw_deg', 'sentry_rate_deg_s',
     'sentry_foot_speed', 'calib_step_deg', 'calib_fine_step_deg', 'trick_foot_speed',
+    'calib_angle_step_deg', 'calib_angle_fine_deg', 'calib_angle_speed_deg_s',
+    'track_gain', 'track_deadband_deg', 'track_timeout_s',
+    'walk_stab_enabled', 'walk_level_kp', 'walk_level_kd', 'walk_level_filter_s',
+    'walk_com_gain', 'walk_com_max', 'walk_tilt_slow_deg', 'walk_tilt_stop_deg', 'walk_min_speed',
+    'walk_heading_gain', 'walk_heading_max',
 ])
 
 
@@ -311,6 +359,18 @@ class GaitNode(Node):
         self.declare_parameter('level_deadband_deg', 0.5)
         self.declare_parameter('level_half_length', 93.0)  # mm, body centre -> front/rear hip
         self.declare_parameter('level_half_width', 80.0)   # mm, body centre -> foot laterally
+        # Walking stabilisation (see WALKING STABILISATION); only with level_enabled.
+        self.declare_parameter('walk_stab_enabled', True)
+        self.declare_parameter('walk_level_kp', 0.5)       # deg correction per deg of tilt
+        self.declare_parameter('walk_level_kd', 0.05)      # deg correction per deg/s of tilt rate
+        self.declare_parameter('walk_level_filter_s', 0.4)  # low-pass on tilt for the slow terms
+        self.declare_parameter('walk_com_gain', 1.0)       # mm of body shift per deg of tilt
+        self.declare_parameter('walk_com_max', 15.0)       # mm clamp per axis
+        self.declare_parameter('walk_tilt_slow_deg', 6.0)  # tilt where the step rate starts to drop
+        self.declare_parameter('walk_tilt_stop_deg', 14.0)  # ... and where it bottoms out
+        self.declare_parameter('walk_min_speed', 0.35)     # step rate fraction at walk_tilt_stop_deg
+        self.declare_parameter('walk_heading_gain', 1.0)   # turn stick per rad of heading drift
+        self.declare_parameter('walk_heading_max', 0.3)    # clamp on that turn
 
         self.declare_parameter('mode_topic', '/spotmicro_move/mode')
         self.declare_parameter('sentry_button', 'y')       # double-tap: sentry mode on/off
@@ -326,6 +386,13 @@ class GaitNode(Node):
         self.declare_parameter('calib_step_deg', 1.0)       # D-pad up/down
         self.declare_parameter('calib_fine_step_deg', 0.25)  # D-pad right/left
         self.declare_parameter('calib_max_offset_deg', 30.0)
+        self.declare_parameter('calib_angle_step_deg', 5.0)      # angle test: right stick up/down
+        self.declare_parameter('calib_angle_fine_deg', 1.0)      # angle test: right stick left/right
+        self.declare_parameter('calib_angle_speed_deg_s', 60.0)  # joint slew rate in the angle test
+        self.declare_parameter('track_topic', '/spotmicro_track/status')
+        self.declare_parameter('track_gain', 1.5)            # sentry tracking: deg/s of pose per deg of error
+        self.declare_parameter('track_deadband_deg', 1.5)
+        self.declare_parameter('track_timeout_s', 0.5)       # older tracker status = not tracking
         self.declare_parameter('trick_button', 'x')
         self.declare_parameter('trick_taps', ['butt_shake', 'dance', 'pushups'])   # X once / twice / 3x
         self.declare_parameter('trick_dpad', ['handshake', 'sit', 'bow', 'pee'])   # X + up/down/left/right
@@ -335,6 +402,10 @@ class GaitNode(Node):
         self.declare_parameter('imu_chord_hold_s', 1.0)
         self.declare_parameter('imu_service_ns', '/spotmicro_imu')
         self.declare_parameter('imu_calib_roll_deg', 15.0)  # armed axis calibration: body roll each way
+        self.declare_parameter('nav_button', 'a')           # double-tap: auto_nav mode on/off
+        self.declare_parameter('cmd_vel_topic', '/spotmicro_move/cmd_vel')
+        self.declare_parameter('cmd_vel_timeout_s', 0.6)
+        self.declare_parameter('cmd_vel_turn_sign', 1.0)
 
         p = self.get_parameter
         self._joy_timeout = float(p('joy_timeout_s').value)
@@ -380,7 +451,9 @@ class GaitNode(Node):
         trick_button = str(p('trick_button').value)
         imu_zero_buttons = list(p('imu_zero_buttons').value)
         imu_calib_buttons = list(p('imu_calib_buttons').value)
-        for name in [sentry_button, *calib_buttons, trick_button, *imu_zero_buttons, *imu_calib_buttons]:
+        nav_button = str(p('nav_button').value)
+        for name in [sentry_button, *calib_buttons, trick_button, *imu_zero_buttons, *imu_calib_buttons,
+                     nav_button]:
             if name not in _BTN:
                 raise ValueError(f"mode button '{name}' not in {BUTTON_NAMES}")
         self._trick_taps_map = [str(n) for n in p('trick_taps').value]
@@ -397,6 +470,13 @@ class GaitNode(Node):
         self._mode = 'walk'
         self._sentry_tap = DoubleTap(_BTN[sentry_button], float(p('double_tap_s').value))
         self._sentry_button = sentry_button
+        self._nav_tap = DoubleTap(_BTN[nav_button], float(p('double_tap_s').value))
+        self._nav_button = nav_button
+        self._cmd_vel = (0.0, 0.0, 0.0)   # forward, left (m/s), turn left (rad/s) from nav_node
+        self._cmd_vel_time = 0.0
+        self._cmd_vel_timeout = float(p('cmd_vel_timeout_s').value)
+        self._cmd_vel_turn_sign = 1.0 if float(p('cmd_vel_turn_sign').value) >= 0 else -1.0
+        self._nav_manual = False          # left stick is overriding cmd_vel
         self._calib_chord = ChordDetector([_BTN[n] for n in calib_buttons], float(p('calib_hold_s').value))
         self._calib_buttons = calib_buttons
         self._pose = [0.0, 0.0, 0.0]      # sentry roll, pitch, yaw (deg), as commanded
@@ -405,10 +485,19 @@ class GaitNode(Node):
         self._calib_dirty = False
         self._calib_note = ''             # last save result, for the Deck
         self._calib_wait_release = False  # ignore D-pad until the mode chord is let go
-        # D-pad steps auto-repeat; leg/joint switches are one per press.
-        self._calib_keys = {name: Repeat() if name.startswith('dpad') else Repeat(1e9)
+        # D-pad and right-stick steps auto-repeat; leg/joint switches and A are one per press.
+        self._calib_keys = {name: Repeat() if name.startswith(('dpad', 'rs_')) else Repeat(1e9)
                             for name in ('dpad_up', 'dpad_down', 'dpad_left', 'dpad_right',
-                                         'l1', 'r1', 'l2', 'r2')}
+                                         'l1', 'r1', 'l2', 'r2', 'a',
+                                         'rs_up', 'rs_down', 'rs_left', 'rs_right')}
+        # Angle test (calibrate mode, A): the selected joint is sent to a set servo angle.
+        self._calib_angle_mode = False
+        self._calib_targets = {}          # (leg, joint) -> target servo angle (deg, before offset)
+        self._calib_slew = {}             # (leg, joint) -> angle commanded now, while it differs from IK
+        # Sentry object tracking (track_node, picked on the Deck).
+        self._track = None                # last status dict from track_node
+        self._track_time = 0.0
+        self._track_was_on = False        # last sentry tick followed the tracker
         self._needs_settle = False        # glide back to stand before walking again
         # Tricks: X taps, or X held + a D-pad direction.
         self._trick_button = trick_button
@@ -448,6 +537,12 @@ class GaitNode(Node):
         self._imu_rp = None              # (roll, pitch) deg, body frame, trim applied
         self._imu_up = None              # world up in the body frame (unit vector)
         self._imu_rate = 0.0             # rad/s, |angular velocity|
+        self._imu_rp_rate = (0.0, 0.0)   # deg/s, roll / pitch rate (same signs as _imu_rp)
+        self._tilt_f = (0.0, 0.0)        # low-passed roll / pitch (deg), see WALKING STABILISATION
+        self._stab = (0.0, 0.0)          # fast roll / pitch correction (deg) while walking
+        self._stab_w = {leg: 1.0 for leg in LEGS}   # how much of it each leg takes (swing legs less)
+        self._gait_rate = 1.0            # step-rate scale from tilt
+        self._heading_ref = None         # IMU yaw (rad) held while walking without turning
         self._last_imu_time = 0.0
 
         self._stable = True              # no foot in the air (see STABLE FLAG)
@@ -466,8 +561,10 @@ class GaitNode(Node):
         self._publish_mode()
 
         self.create_subscription(Joy, p('joy_topic').value, self._on_joy, 10)
+        self.create_subscription(Twist, p('cmd_vel_topic').value, self._on_cmd_vel, 10)
         # Always subscribed (cheap) so leveling can be switched on live.
         self.create_subscription(Imu, p('imu_topic').value, self._on_imu, qos_profile_sensor_data)
+        self.create_subscription(String, p('track_topic').value, self._on_track, 10)
         self._control_dt = 1.0 / float(p('control_hz').value)
         self._jiggle_ticks_per_step = max(1, round(0.12 / self._control_dt))
         self._engage_ticks_per_leg = max(1, round(float(p('arm_leg_stagger_s').value) / self._control_dt))
@@ -486,7 +583,7 @@ class GaitNode(Node):
             f'sticks walk once armed, "{self._up_button}"/"{self._down_button}" raise/lower, '
             f'"{self._estop_button}" to go limp. Once armed: double-tap "{sentry_button}" '
             f'for sentry (pose in place), hold "{"+".join(calib_buttons)}" for calibration, '
-            f'tap "{trick_button}" (or hold it + D-pad) for tricks. '
+            f'tap "{trick_button}" (or hold it + D-pad) for tricks, double-tap "{nav_button}" for auto nav. '
             f'Hold "{"+".join(imu_zero_buttons)}" to zero the IMU, '
             f'"{"+".join(imu_calib_buttons)}" to calibrate its axes.')
 
@@ -546,6 +643,8 @@ class GaitNode(Node):
         if 'level_enabled' in changed and not self._level_enabled:
             self._level_roll = 0.0
             self._level_pitch = 0.0
+            self._stab = (0.0, 0.0)
+            self._gait_rate = 1.0
 
         self._sentry_max = [float(p(f'sentry_max_{a}_deg').value) for a in ('roll', 'pitch', 'yaw')]
         self._sentry_rate = max(float(p('sentry_rate_deg_s').value), 1.0)
@@ -553,6 +652,24 @@ class GaitNode(Node):
         self._calib_step = float(p('calib_step_deg').value)
         self._calib_fine_step = float(p('calib_fine_step_deg').value)
         self._trick_foot_speed = max(float(p('trick_foot_speed').value), 1.0)
+        self._calib_angle_step = float(p('calib_angle_step_deg').value)
+        self._calib_angle_fine = float(p('calib_angle_fine_deg').value)
+        self._calib_angle_speed = max(float(p('calib_angle_speed_deg_s').value), 1.0)
+        self._track_gain = max(float(p('track_gain').value), 0.0)
+        self._track_deadband = max(float(p('track_deadband_deg').value), 0.0)
+        self._track_timeout = float(p('track_timeout_s').value)
+
+        self._walk_stab = bool(p('walk_stab_enabled').value)
+        self._walk_kp = float(p('walk_level_kp').value)
+        self._walk_kd = float(p('walk_level_kd').value)
+        self._walk_filter_s = max(float(p('walk_level_filter_s').value), 0.0)
+        self._walk_com_gain = float(p('walk_com_gain').value)
+        self._walk_com_max = max(float(p('walk_com_max').value), 0.0)
+        self._walk_tilt_slow = float(p('walk_tilt_slow_deg').value)
+        self._walk_tilt_stop = max(float(p('walk_tilt_stop_deg').value), self._walk_tilt_slow + 0.1)
+        self._walk_min_speed = min(max(float(p('walk_min_speed').value), 0.05), 1.0)
+        self._walk_heading_gain = float(p('walk_heading_gain').value)
+        self._walk_heading_max = max(float(p('walk_heading_max').value), 0.0)
 
     def _validate_params(self, params):
         """Pre-set check for live changes: only LIVE_PARAMS, with sane values, and
@@ -594,6 +711,10 @@ class GaitNode(Node):
         self._last_joy = msg
         self._last_joy_time = time.monotonic()
 
+    def _on_cmd_vel(self, msg):
+        self._cmd_vel = (msg.linear.x, msg.linear.y, msg.angular.z)
+        self._cmd_vel_time = time.monotonic()
+
     def _on_imu(self, msg):
         q = msg.orientation
         roll = math.degrees(math.atan2(2.0 * (q.w * q.x + q.y * q.z),
@@ -608,8 +729,39 @@ class GaitNode(Node):
                         1.0 - 2.0 * (q.x * q.x + q.y * q.y))
         w = msg.angular_velocity
         self._imu_rate = math.sqrt(w.x * w.x + w.y * w.y + w.z * w.z)
+        rr, pr = math.degrees(w.x), math.degrees(w.y)
+        if self._imu_swap:
+            rr, pr = pr, rr
+        self._imu_rp_rate = (self._imu_roll_sign * rr, self._imu_pitch_sign * pr)
         self._imu_yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
         self._last_imu_time = time.monotonic()
+
+    def _on_track(self, msg):
+        try:
+            track = json.loads(msg.data)
+        except ValueError:
+            return
+        if isinstance(track, dict):
+            self._track = track
+            self._track_time = time.monotonic()
+
+    def _tracking(self):
+        """None when track_node isn't following anything (idle, or its status is
+        stale); (0, 0) while it is but has no fix (starting / lost: hold the
+        pose); else (yaw_err, pitch_err) deg: + = target left of / below centre."""
+        t = self._track
+        if t is None or time.monotonic() - self._track_time > self._track_timeout:
+            return None
+        state = t.get('state')
+        if state in ('starting', 'lost'):
+            return 0.0, 0.0
+        if state != 'tracking':
+            return None
+        try:
+            yaw, pitch = (float(v) for v in t['err_deg'])
+        except (KeyError, TypeError, ValueError):
+            return 0.0, 0.0
+        return yaw, pitch
 
     def _imu_fresh(self):
         return (self._imu_rp is not None
@@ -679,6 +831,8 @@ class GaitNode(Node):
         self._feet = None
         self._level_roll = 0.0
         self._level_pitch = 0.0
+        self._stab = (0.0, 0.0)
+        self._heading_ref = None
         try:
             if self.dog is not None:
                 self.dog.release()
@@ -700,6 +854,7 @@ class GaitNode(Node):
             self._arm_progress = 0
             self._jiggle_queue = []
             self._sentry_tap.reset()
+            self._nav_tap.reset()
             self._calib_chord.reset()
             self._imu_zero_chord.reset()
             self._imu_cal_chord.reset()
@@ -744,6 +899,8 @@ class GaitNode(Node):
             self._jiggle_tick_step()
             return
 
+        if self._mode not in ('walk', 'auto_nav'):
+            self._decay_stab(dt)
         if self._mode == 'calibrate':
             self._calib_tick(joy, now, dt)
             return
@@ -756,7 +913,7 @@ class GaitNode(Node):
 
         up = bool(joy.buttons[_BTN[self._up_button]])
         down = bool(joy.buttons[_BTN[self._down_button]])
-        if up != down:   # both held = Deck stack-toggle chord, leave height alone
+        if up != down and self._mode != 'auto_nav':   # both held = Deck stack-toggle chord, leave height alone
             dz = self._height_rate * dt * (1.0 if up else -1.0)
             self._z = min(max(self._z + dz, self._z_min), self._z_max)
 
@@ -768,8 +925,22 @@ class GaitNode(Node):
         vx = -_deadzone(joy.axes[_AX['left_y']], self._deadzone)
         vy = _deadzone(joy.axes[_AX['left_x']], self._deadzone)     # strafe left = +
         wz = _deadzone(joy.axes[_AX['right_x']], self._deadzone)    # turn = +
+        scale = self._speed_scale
+        if self._mode == 'auto_nav':
+            # The right stick moves the Deck's map cursor here, so it never turns
+            # the robot; the left stick's x turns instead of strafing. Auto nav
+            # never walks sideways: it turns to face the way it's going.
+            manual = vx != 0.0 or vy != 0.0
+            wz, vy = vy, 0.0
+            if manual != self._nav_manual:
+                self._nav_manual = manual
+                self._publish_mode()
+            if not manual:
+                vx, _vy, wz = self._cmd_vel_strides()
+                scale = 1.0   # already in stride units
 
-        self._update_leveling(dt)
+        walking = not self._needs_settle and (vx != 0.0 or vy != 0.0 or wz != 0.0)
+        self._update_leveling(dt, walking)
 
         if self._needs_settle:
             # Just left sentry/calibrate: glide back to the stand pose before walking.
@@ -778,17 +949,61 @@ class GaitNode(Node):
                 self._needs_settle = False
             return
 
-        if vx == 0.0 and vy == 0.0 and wz == 0.0:
+        if not walking:
             self._t = 0.0
+            self._heading_ref = None
             self._settle_tick(dt)
             return
 
-        vx *= self._speed_scale
-        vy *= self._speed_scale
-        wz *= self._speed_scale
+        vx *= scale
+        vy *= scale
+        wz *= scale
+        wz = self._heading_hold(vx, vy, wz)
 
-        self._t += dt
+        self._t += dt * self._gait_rate
         self._gait_tick(vx, vy, wz)
+
+    def _stabilising(self):
+        """The walking IMU terms are on (leveling + walk_stab_enabled) and the IMU is live."""
+        return self._level_enabled and self._walk_stab and self._imu_fresh()
+
+    def _heading_hold(self, vx, vy, wz):
+        """While walking with no turn asked for, steer back to the IMU heading
+        held since the turn stick was let go, so a straight walk stays straight
+        (feet slip unevenly, and a crawl veers). Any turn command, or stopping,
+        lets go of the held heading."""
+        if wz != 0.0 or (vx == 0.0 and vy == 0.0) or not self._stabilising() \
+                or self._walk_heading_gain <= 0.0:
+            self._heading_ref = None
+            return wz
+        if self._heading_ref is None:
+            self._heading_ref = self._imu_yaw
+            return wz
+        err = math.atan2(math.sin(self._heading_ref - self._imu_yaw),
+                         math.cos(self._heading_ref - self._imu_yaw))   # + = need to turn left
+        lim = self._walk_heading_max
+        # Same mapping as auto nav's cmd_vel: +angular.z (left) -> cmd_vel_turn_sign * wz.
+        return self._cmd_vel_turn_sign * max(-lim, min(lim, self._walk_heading_gain * err))
+
+    def _cmd_vel_strides(self):
+        """nav_node's cmd_vel as stick-equivalent (vx, vy, wz), where 1.0 = a
+        full stride (before speed_scale): the inverse of _gait_tick's odometry
+        estimate for translation, and of _turn_offset's arc for turning."""
+        if time.monotonic() - self._cmd_vel_time > self._cmd_vel_timeout:
+            return 0.0, 0.0, 0.0
+        fwd, left, turn = self._cmd_vel
+        stance_len = 1.0 - (self._slot_frac - self._swing_start)
+        k = 2e-3 * self._gait_freq / stance_len * self._odom_scale     # mm stride -> m/s
+        vx = fwd / (self._step_length * k) if self._step_length > 0.0 else 0.0
+        vy = left / (self._step_lateral * k) if self._step_lateral > 0.0 else 0.0
+        # A stance foot sweeps 2 * turn_gain mm of arc at its radius r (as in
+        # _turn_offset) per stance phase; average the front and rear radii.
+        side = self._half_width + self._stance_y
+        r = 0.5 * (math.hypot(self._half_length + self._ik_x_sign * self._stance_x_front, side)
+                   + math.hypot(-self._half_length + self._ik_x_sign * self._stance_x_rear, side))
+        w_full = 2.0 * self._turn_gain / r * self._gait_freq / stance_len   # rad/s at wz = 1
+        wz = self._cmd_vel_turn_sign * turn / w_full if self._turn_gain > 0.0 else 0.0
+        return (max(-1.0, min(1.0, vx)), max(-1.0, min(1.0, vy)), max(-1.0, min(1.0, wz)))
 
     # ── foot placement ───────────────────────────────────────────────────────
 
@@ -804,7 +1019,7 @@ class GaitNode(Node):
         self._feet = {leg: list(pos) for leg, pos in feet.items()}
         for leg, (x, y, z) in feet.items():
             if raw:
-                self.dog.move_leg(leg, x, y, z)
+                self.dog.move_leg(leg, x, y, z, joint_angles=self._calib_overrides(leg))
                 continue
             tx, ty, tz = self._trim[leg]
             self.dog.move_leg(leg, x + tx, y + ty, z + tz + self._level_dz(leg))
@@ -839,24 +1054,53 @@ class GaitNode(Node):
 
     # ── leveling ─────────────────────────────────────────────────────────────
 
-    def _update_leveling(self, dt):
-        if not self._level_enabled:
-            return
-        if not self._imu_fresh():
-            # No IMU: bleed the correction back to neutral rather than hold a stale one.
+    def _update_leveling(self, dt, walking=False):
+        stab = walking and self._walk_stab
+        if not walking:
+            self._stab_w = {leg: 1.0 for leg in LEGS}
+        if not (self._level_enabled and self._imu_fresh()):
+            # No IMU (or leveling off): bleed the corrections back to neutral
+            # rather than hold stale ones.
             decay = max(0.0, 1.0 - dt)
             self._level_roll *= decay
             self._level_pitch *= decay
-            self.get_logger().warn('No fresh IMU data — leveling paused.', throttle_duration_sec=5.0)
+            self._stab = (0.0, 0.0)
+            self._gait_rate = 1.0
+            if self._level_enabled:
+                self.get_logger().warn('No fresh IMU data — leveling paused.', throttle_duration_sec=5.0)
             return
         roll, pitch = self._imu_rp
-        if abs(roll) > self._level_deadband:
-            self._level_roll += self._level_gain * roll * dt
-        if abs(pitch) > self._level_deadband:
-            self._level_pitch += self._level_gain * pitch * dt
+        a = dt / (self._walk_filter_s + dt) if self._walk_filter_s + dt > 0.0 else 1.0
+        self._tilt_f = tuple(f + a * (v - f) for f, v in zip(self._tilt_f, (roll, pitch)))
+        # Walking rocks the body every step; integrating that would chase it,
+        # so the slow integral follows the filtered tilt then (the fast terms
+        # below handle the rocking).
+        i_roll, i_pitch = self._tilt_f if stab else (roll, pitch)
+        if abs(i_roll) > self._level_deadband:
+            self._level_roll += self._level_gain * i_roll * dt
+        if abs(i_pitch) > self._level_deadband:
+            self._level_pitch += self._level_gain * i_pitch * dt
         lim = self._level_max
         self._level_roll = max(-lim, min(lim, self._level_roll))
         self._level_pitch = max(-lim, min(lim, self._level_pitch))
+
+        if stab:
+            # Fast PD correction on the raw tilt and gyro rate, on top of the integral.
+            rr, pr = self._imu_rp_rate
+            self._stab = (max(-lim, min(lim, self._walk_kp * roll + self._walk_kd * rr)),
+                          max(-lim, min(lim, self._walk_kp * pitch + self._walk_kd * pr)))
+            # Tipping a lot: slow the steps down (never to a stop mid-swing).
+            tilt = math.hypot(*self._tilt_f)
+            over = (tilt - self._walk_tilt_slow) / (self._walk_tilt_stop - self._walk_tilt_slow)
+            self._gait_rate = 1.0 - min(max(over, 0.0), 1.0) * (1.0 - self._walk_min_speed)
+        else:
+            self._decay_stab(dt)
+
+    def _decay_stab(self, dt):
+        """Not walking: ease the fast correction out over ~0.2 s instead of dropping it."""
+        k = max(0.0, 1.0 - dt / 0.2)
+        self._stab = (self._stab[0] * k, self._stab[1] * k)
+        self._gait_rate = 1.0
 
     def _level_dz(self, leg):
         """Extra leg extension (mm) for this leg from the leveling correction.
@@ -864,9 +1108,12 @@ class GaitNode(Node):
         down -> extend right legs."""
         if not self._level_enabled:
             return 0.0
-        dz = self._half_length * math.sin(math.radians(self._level_pitch))
+        w = self._stab_w[leg]
+        pitch = self._level_pitch + w * self._stab[1]
+        roll = self._level_roll + w * self._stab[0]
+        dz = self._half_length * math.sin(math.radians(pitch))
         dz *= 1.0 if leg in FRONT else -1.0
-        droll = self._half_width * math.sin(math.radians(self._level_roll))
+        droll = self._half_width * math.sin(math.radians(roll))
         dz += -droll if leg in LEFT_SIDE else droll
         return dz
 
@@ -953,8 +1200,15 @@ class GaitNode(Node):
 
         swing_len = self._slot_frac - self._swing_start
         stance_len = 1.0 - swing_len
-        k = 2e-3 * self._gait_freq / stance_len * self._odom_scale   # mm stride -> m/s
+        k = 2e-3 * self._gait_freq * self._gait_rate / stance_len * self._odom_scale   # mm stride -> m/s
         self._odom_v = (stride_x * k, stride_y * k)
+        if self._stabilising() and self._walk_com_gain != 0.0:
+            # Lean the body away from the side it is tipping toward (+roll =
+            # right side down -> shift left; +pitch = nose down -> shift back).
+            lim = self._walk_com_max
+            roll_f, pitch_f = self._tilt_f
+            by += max(-lim, min(lim, self._walk_com_gain * roll_f))
+            bx -= max(-lim, min(lim, self._walk_com_gain * pitch_f))
 
         feet = {}
         for leg in LEGS:
@@ -967,16 +1221,23 @@ class GaitNode(Node):
                 # lift-off and touchdown): cosine ease fore/aft, sin^2 lift.
                 ease = 0.5 - 0.5 * math.cos(math.pi * sw)
                 s = 2.0 * ease - 1.0                           # -1 -> +1
-                dz = -self._step_height * math.sin(math.pi * sw) ** 2   # lift (shorten the leg)
+                lift = math.sin(math.pi * sw) ** 2
+                dz = -self._step_height * lift                 # lift (shorten the leg)
                 self._stable = False
+                # A raised foot takes little of the fast tilt correction, so the
+                # correction can't eat its ground clearance; eased back in as it lands.
+                self._stab_w[leg] = 1.0 - lift
             else:
                 st = ((local - self._slot_frac) % 1.0) / stance_len   # 0..1 across stance
                 s = 1.0 - 2.0 * st                             # +1 -> -1
                 dz = 0.0
+                self._stab_w[leg] = 1.0
 
             tx, ty = self._turn_offset(leg, wz, s)
             # IK y is per-leg "outward", so a body-frame strafe is +y on the
-            # left legs and -y on the right legs.
+            # left legs and -y on the right legs. stride_x deliberately does NOT
+            # go through ik_x_sign: applying it (2026-10-13) made a forward
+            # stick walk backward on the real robot.
             dx = stride_x * s + tx
             dy = side * stride_y * s + ty
             r = math.hypot(dx, dy)
@@ -1001,11 +1262,27 @@ class GaitNode(Node):
         tricks. Fed every tick so the detectors track the buttons even while
         disarmed."""
         tap = self._sentry_tap.update(joy.buttons, now)
+        nav = self._nav_tap.update(joy.buttons, now)
         calib = self._calib_chord.update(joy.buttons, now)
         imu_zero = self._imu_zero_chord.update(joy.buttons, now)
         imu_cal = self._imu_cal_chord.update(joy.buttons, now)
         trick = self._trick_input(joy, now)
         ready = self._armed and not self._engage_queue and not self._jiggle_queue
+
+        if nav:
+            if not ready:
+                self.get_logger().info('Auto nav needs the robot armed (and the legs engaged).')
+            elif self._mode == 'auto_nav':
+                self._set_mode('walk')
+            elif self._mode == 'walk':
+                self._set_mode('auto_nav')
+            else:
+                self.get_logger().info(f'Auto nav ignored in {self._mode} mode.')
+        if self._mode == 'auto_nav':
+            if tap or calib or imu_zero or imu_cal or trick:
+                self.get_logger().info(f'Mode buttons ignored in auto nav (double-tap '
+                                       f'"{self._nav_button}" to leave it first).')
+            return
 
         if imu_zero:
             if self._mode in ('calibrate', 'imu_calib', 'trick'):
@@ -1243,6 +1520,8 @@ class GaitNode(Node):
             return
         if old == 'calibrate':
             self._save_calibration()
+            self._calib_angle_mode = False
+            self._calib_slew = {}
         if old == 'trick':
             self._trick = None
         if old == 'imu_calib':
@@ -1250,17 +1529,23 @@ class GaitNode(Node):
         self._mode = mode
         self._t = 0.0
         self._pose = [0.0, 0.0, 0.0]
+        self._track_was_on = False
         if mode == 'calibrate':
             self._calib_note = ''
             self._calib_wait_release = True   # the chord's buttons are still down
             leg, joint = LEGS[self._calib_leg], JOINTS[self._calib_joint]
             self.get_logger().warn(
                 f'CALIBRATION mode: feet to IK {self._calib_pose}, no trim/leveling. L1/R1 leg, '
-                f'L2/R2 joint, D-pad offset. Now on {leg} {joint}.')
+                f'L2/R2 joint, D-pad offset, A angle test (right stick sets the angle). '
+                f'Now on {leg} {joint}.')
         elif mode == 'trick':
             self.get_logger().info(f'TRICK: {self._trick["name"]} (press "{self._trick_button}" to stop).')
         elif mode == 'imu_calib':
             pass   # _start_imu_cal logs it
+        elif mode == 'auto_nav':
+            self._nav_manual = False
+            self.get_logger().info('AUTO NAV mode: walking to goals from nav_node (double-tap '
+                                   f'"{self._nav_button}" to leave). Left stick overrides.')
         elif mode == 'sentry':
             self.get_logger().info('SENTRY mode: feet planted, sticks pose the body (double-tap '
                                    f'"{self._sentry_button}" to walk again).')
@@ -1273,6 +1558,8 @@ class GaitNode(Node):
         """On disarm / fault: back to walk, saving any calibration changes."""
         if self._mode == 'calibrate':
             self._save_calibration()
+        self._calib_angle_mode = False
+        self._calib_slew = {}
         if self._mode == 'imu_calib':
             self._note_seq += 1
             self._note = {'seq': self._note_seq, 'text': 'IMU calibration cancelled', 'ok': False}
@@ -1287,8 +1574,11 @@ class GaitNode(Node):
         msg = {'mode': self._mode}
         if self._mode == 'sentry':
             msg['pose'] = dict(zip(('roll', 'pitch', 'yaw'), (round(a, 1) for a in self._pose)))
+            msg['tracking'] = self._track_was_on
         if self._mode == 'trick' and self._trick:
             msg['trick'] = self._trick['name']
+        if self._mode == 'auto_nav':
+            msg['manual'] = self._nav_manual
         if self._mode == 'imu_calib' and self._imu_cal:
             c = self._imu_cal
             msg['imu_calib'] = {'step': c['step'], 'auto': c['auto'], 'prompt': self._imu_cal_prompt()}
@@ -1304,12 +1594,26 @@ class GaitNode(Node):
                 'offsets': {lg: [getattr(self._calibration[lg], j).offset for j in JOINTS] for lg in LEGS},
                 'unsaved': self._calib_dirty,
                 'note': self._calib_note,
+                'angle_mode': self._calib_angle_mode,
             }
+            if self._mode == 'calibrate' and self.dog is not None:
+                # Angle test readout: target, where the joint is commanded now
+                # (both before the offset) and what the servo actually gets.
+                key = (leg, joint)
+                angle = self._calib_slew.get(key)
+                if angle is None:
+                    angle = self._calib_ik_angle(leg, joint)
+                if angle is not None:
+                    msg['calib'].update(
+                        target=round(self._calib_target(leg, joint), 2), angle=round(angle, 2),
+                        servo=round(self.dog.legs[leg].servo_command(joint, angle), 2))
         self._mode_pub.publish(String(data=json.dumps(msg, separators=(',', ':'))))
         self._last_mode_pub = time.monotonic()
 
     def _sentry_tick(self, joy, now, dt):
-        """Feet stay on their stand points; the body rolls/pitches/yaws over them."""
+        """Feet stay on their stand points; the body rolls/pitches/yaws over them.
+        While track_node is locked onto something picked on the Deck, yaw and
+        pitch follow it instead of the sticks (roll stays on the left stick)."""
         ax = joy.axes
         dz = self._deadzone
         # Protocol convention: stick left / up = +. Left stick left leans left
@@ -1318,6 +1622,19 @@ class GaitNode(Node):
                 _rescaled(ax[_AX['left_y']], dz) * self._sentry_max[1],
                 _rescaled(ax[_AX['right_x']], dz) * self._sentry_max[2]]
         step = self._sentry_rate * dt
+        tracking = self._tracking()
+        if tracking is not None:
+            # Turn toward the target: +yaw error (target left) -> yaw left,
+            # +pitch error (target below) -> nose down. Velocity control, since
+            # the error is measured from where the camera already points.
+            yaw_err, pitch_err = tracking
+            for i, err in ((2, yaw_err), (1, pitch_err)):
+                err = math.copysign(max(abs(err) - self._track_deadband, 0.0), err)
+                v = max(-self._sentry_rate, min(self._sentry_rate, self._track_gain * err))
+                want[i] = max(-self._sentry_max[i], min(self._sentry_max[i], self._pose[i] + v * dt))
+        if (tracking is not None) != self._track_was_on:
+            self._track_was_on = tracking is not None
+            self._publish_mode()
         self._pose = [p + min(max(w - p, -step), step) for p, w in zip(self._pose, want)]
         roll, pitch, yaw = self._pose
         self._move_toward(self._posed_feet(tricks.Pose(roll=roll, pitch=pitch, yaw=yaw)),
@@ -1375,8 +1692,74 @@ class GaitNode(Node):
                             ('dpad_right', self._calib_fine_step), ('dpad_left', -self._calib_fine_step)):
             if keys[name].update(down(name) and live, now):
                 self._adjust_offset(delta)
+        if keys['a'].update(down('a') and live, now):
+            self._calib_angle_mode = not self._calib_angle_mode
+            leg, joint = LEGS[self._calib_leg], JOINTS[self._calib_joint]
+            self.get_logger().info(
+                f'Angle test {"ON" if self._calib_angle_mode else "OFF"} ({leg} {joint})')
+            moved = True
+        if self._calib_angle_mode:
+            # Right stick (protocol: up / left = +): up/down coarse, right/left fine.
+            rx, ry = joy.axes[_AX['right_x']], joy.axes[_AX['right_y']]
+            for name, pushed, delta in (('rs_up', ry > 0.6, self._calib_angle_step),
+                                        ('rs_down', ry < -0.6, -self._calib_angle_step),
+                                        ('rs_right', rx < -0.6, self._calib_angle_fine),
+                                        ('rs_left', rx > 0.6, -self._calib_angle_fine)):
+                if keys[name].update(pushed and live, now):
+                    self._adjust_angle_target(delta)
+        self._calib_slew_tick(dt)
+        if moved or self._calib_slew:
+            if moved or now - self._last_mode_pub >= 0.2:
+                self._publish_mode()
         x, y, z = self._calib_pose
         self._move_toward({leg: [x, y, z] for leg in LEGS}, dt, self._settle_speed, raw=True)
+
+    def _calib_ik_angle(self, leg, joint):
+        """Servo angle (deg, before offset) IK gives `joint` at the foot's current spot."""
+        pos = self._feet[leg] if self._feet is not None else self._calib_pose
+        return self.dog.legs[leg].joint_angles(*pos)[joint]
+
+    def _calib_target(self, leg, joint):
+        """Angle-test target for a joint: where it was last set, else where IK
+        has it in calib_pose (where the offsets were verified)."""
+        if (leg, joint) not in self._calib_targets:
+            ik = self.dog.legs[leg].joint_angles(*self._calib_pose)[joint]
+            self._calib_targets[(leg, joint)] = round(ik * 2.0) / 2.0 if ik is not None else 90.0
+        return self._calib_targets[(leg, joint)]
+
+    def _adjust_angle_target(self, delta):
+        leg, joint = LEGS[self._calib_leg], JOINTS[self._calib_joint]
+        rng = getattr(self._calibration[leg], joint).range
+        cur = self._calib_target(leg, joint)
+        new = round(min(max(cur + delta, 0.0), rng), 2)
+        self._calib_targets[(leg, joint)] = new
+        self.get_logger().info(f'{leg} {joint} angle target {cur:.1f} -> {new:.1f} deg')
+
+    def _calib_slew_tick(self, dt):
+        """Move the angle-tested joint toward its target (and any joint that
+        was being tested back to its IK angle) at calib_angle_speed_deg_s, so
+        nothing jumps when the test starts, stops or changes joint."""
+        sel = (LEGS[self._calib_leg], JOINTS[self._calib_joint])
+        if self._calib_angle_mode and sel not in self._calib_slew:
+            start = self._calib_ik_angle(*sel)
+            self._calib_slew[sel] = start if start is not None else self._calib_target(*sel)
+        step = self._calib_angle_speed * dt
+        for key in list(self._calib_slew):
+            to_target = self._calib_angle_mode and key == sel
+            goal = self._calib_target(*key) if to_target else self._calib_ik_angle(*key)
+            if goal is None:
+                continue   # IK unreachable for that joint: hold where it is
+            cur = self._calib_slew[key]
+            nxt = cur + min(max(goal - cur, -step), step)
+            if not to_target and abs(goal - nxt) < 1e-6:
+                del self._calib_slew[key]   # back on IK
+            else:
+                self._calib_slew[key] = nxt
+
+    def _calib_overrides(self, leg):
+        """{joint: servo angle} for this leg's joints under the angle test, or None."""
+        out = {joint: a for (lg, joint), a in self._calib_slew.items() if lg == leg}
+        return out or None
 
     def _adjust_offset(self, delta):
         leg, joint = LEGS[self._calib_leg], JOINTS[self._calib_joint]
@@ -1451,6 +1834,8 @@ class GaitNode(Node):
         self._feet = None
         self._level_roll = 0.0
         self._level_pitch = 0.0
+        self._stab = (0.0, 0.0)
+        self._heading_ref = None
         self.get_logger().warn(f'DISARMED ({reason}) — servos released. Hold the arm chord again to resume.')
 
     def _engage_tick_step(self):

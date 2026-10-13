@@ -105,25 +105,25 @@ class Bno055:
 
     def read_quaternion(self):
         """(w, x, y, z), unit quaternion."""
-        w, x, y, z = self._read_signed16_block(_QUA_DATA, 4)
+        w, x, y, z = self._read_signed16_block(_QUA_DATA, 4)  # pylint: disable=unbalanced-tuple-unpacking
         scale = 1.0 / (1 << 14)   # Q14 format: 2^14 LSB per unit quaternion
         return (w * scale, x * scale, y * scale, z * scale)
 
     def read_gyro(self):
         """(x, y, z), rad/s."""
-        x, y, z = self._read_signed16_block(_GYR_DATA, 3)
+        x, y, z = self._read_signed16_block(_GYR_DATA, 3)  # pylint: disable=unbalanced-tuple-unpacking
         scale = 1.0 / 900.0   # 900 LSB per rad/s (UNIT_SEL set to rps in __init__)
         return (x * scale, y * scale, z * scale)
 
     def read_linear_acceleration(self):
         """(x, y, z), m/s^2, with gravity subtracted out."""
-        x, y, z = self._read_signed16_block(_LIA_DATA, 3)
+        x, y, z = self._read_signed16_block(_LIA_DATA, 3)  # pylint: disable=unbalanced-tuple-unpacking
         scale = 1.0 / 100.0   # 100 LSB per m/s^2
         return (x * scale, y * scale, z * scale)
 
     def read_magnetic(self):
         """(x, y, z), microtesla."""
-        x, y, z = self._read_signed16_block(_MAG_DATA, 3)
+        x, y, z = self._read_signed16_block(_MAG_DATA, 3)  # pylint: disable=unbalanced-tuple-unpacking
         scale = 1.0 / 16.0   # 16 LSB per microtesla
         return (x * scale, y * scale, z * scale)
 

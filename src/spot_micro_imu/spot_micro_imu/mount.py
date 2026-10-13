@@ -206,7 +206,7 @@ def describe(q_sb):
     names = ('x', 'y', 'z')
     parts = []
     for label, v in zip(('forward', 'left', 'up'), body_axes(q_sb)):
-        i = max(range(3), key=lambda k: abs(v[k]))
+        i = max(range(3), key=lambda k: abs(v[k]))  # pylint: disable=cell-var-from-loop
         off = tilt_deg(v, tuple((1.0 if k == i else 0.0) * math.copysign(1.0, v[i]) for k in range(3)))
         parts.append(f'{label} = sensor {"+" if v[i] >= 0 else "-"}{names[i]}'
                      + (f' ({off:.0f} deg off)' if off >= 2.0 else ''))
