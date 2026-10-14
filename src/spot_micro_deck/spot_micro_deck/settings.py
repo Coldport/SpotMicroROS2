@@ -47,8 +47,9 @@ def _f(key, label, group, lo, hi, step, unit='', help='', target='gait'):  # pyl
 
 SETTINGS = [
     # ── Walk ──
-    Setting('gait_type', 'Gait', 'Walk', 'enum', options=['crawl', 'trot'],
-            help='crawl: one leg up at a time. trot: diagonal pairs. Stop walking to switch.'),
+    Setting('gait_type', 'Gait', 'Walk', 'enum', options=['crawl', 'crawl8', 'trot'],
+            help='crawl: one leg up at a time. crawl8: mike4192 8-phase crawl. trot: diagonal pairs. '
+                 'Stop walking to switch.'),
     _f('speed_scale', 'Speed', 'Walk', 0.1, 1.5, 0.05, 'x', 'Multiplies the sticks before they become stride.'),
     _f('gait_freq', 'Step rate', 'Walk', 0.1, 2.0, 0.05, 'Hz', 'Full step cycles per second.'),
     _f('step_length', 'Stride length', 'Walk', 0.0, 70.0, 5.0, 'mm', 'Fore/aft stride at full stick.'),
@@ -72,6 +73,10 @@ SETTINGS = [
     _f('balance_max_shift', 'Max sway', 'Balance', 0.0, 60.0, 5.0, 'mm'),
     _f('shift_frac', 'Four-feet-down time', 'Balance', 0.0, 0.9, 0.05, '', 'Share of each leg slot spent shifting.'),
     _f('shift_overlap', 'Sway overlap', 'Balance', 0.0, 0.5, 0.05, '', 'How far the slide spills into the swing.'),
+    _f('crawl8_shift_fwd', 'crawl8 sway forward', 'Balance', 0.0, 50.0, 5.0, 'mm',
+       'Body forward while a rear leg swings.'),
+    _f('crawl8_shift_back', 'crawl8 sway back', 'Balance', 0.0, 50.0, 5.0, 'mm', 'Body back while a front leg swings.'),
+    _f('crawl8_shift_side', 'crawl8 sway sideways', 'Balance', 0.0, 40.0, 5.0, 'mm', 'Body away from the lifted leg.'),
     # ── Leveling ──
     Setting('level_enabled', 'IMU leveling', 'Leveling', 'bool',
             help='Use the IMU to keep the body level.'),

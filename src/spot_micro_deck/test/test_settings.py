@@ -40,7 +40,7 @@ def test_payload_marks_unreachable_targets():
     items = {i['key']: i for i in msg['items']}
     assert items['step_height']['value'] == 40.0 and not items['step_height']['available']
     assert items['video_max_fps']['available']
-    assert items['gait_type']['options'] == ['crawl', 'trot']
+    assert items['gait_type']['options'] == ['crawl', 'crawl8', 'trot']
     json.dumps(msg)   # must be serialisable as-is
 
 

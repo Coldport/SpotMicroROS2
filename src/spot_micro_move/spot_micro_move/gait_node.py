@@ -37,7 +37,14 @@ a servo until L3+R3 is held too.
 GAIT: `gait_type` "crawl" (default) lifts one leg at a time in the order
 RL -> FL -> RR -> FR, so three feet are always on the ground; each leg gets
 1/4 of the cycle (body shift, then swing — see BALANCE SHIFT). "trot" is the old diagonal-pair gait (FL+RR, FR+RL),
-swinging for 1/2 of the cycle.
+swinging for 1/2 of the cycle. "crawl8" is mike4192's 8-phase crawl
+(RR -> FR -> RL -> FL): the cycle is 8 equal phases, alternating four feet
+down while the body shifts and one leg swinging while the body holds still
+(shift_frac 0.5, shift_overlap 0, whatever those params say). Its body shift
+is a fixed amount in mm, not the support-triangle centroid: `crawl8_shift_fwd`
+forward when a rear leg lifts, `crawl8_shift_back` back when a front leg
+lifts, and `crawl8_shift_side` away from the lifted leg. mike4192 runs it at
+0.36 s per phase, i.e. gait_freq ~0.35.
 
 STANCE: feet sit a little outside the hips (`stance_y`), front feet a little
 ahead of the front hips (`stance_x_front`) and rear feet a little behind the
@@ -63,7 +70,7 @@ no jerk at its start or end.
 Target = gain * (centroid of the other three feet), using `level_half_length`
 / `level_half_width` as the foot rectangle; `balance_gain_lateral` and
 `balance_gain_fore_aft` scale it, `balance_max_shift` clamps it (mm). Fore/aft
-uses `ik_x_forward_sign` to map body-forward onto IK x. Crawl only (trot has
+uses `ik_x_forward_sign` to map body-forward onto IK x. Crawl/crawl8 only (trot has
 two feet down on a diagonal, which a body shift can't help).
 
 TURNING: the turn stick rotates the body about its centre, so each foot's
@@ -234,7 +241,10 @@ _BTN = {name: i for i, name in enumerate(BUTTON_NAMES)}
 GAITS = {
     'crawl': ({'RL': 0.0, 'FL': 0.25, 'RR': 0.5, 'FR': 0.75}, 0.25),
     'trot': ({'FL': 0.0, 'RR': 0.0, 'FR': 0.5, 'RL': 0.5}, 0.5),
+    # crawl8: mike4192's order; shift_frac forced to 0.5 -> 8 equal phases.
+    'crawl8': ({'RR': 0.0, 'FR': 0.25, 'RL': 0.5, 'FL': 0.75}, 0.25),
 }
+CRAWLS = ('crawl', 'crawl8')   # gaits with a four-feet-down body shift
 LEFT_SIDE = {"FL", "RL"}   # sign convention for the turn approximation below
 FRONT = {"FL", "FR"}
 LEGS = ('FL', 'FR', 'RL', 'RR')
@@ -253,6 +263,7 @@ LIVE_PARAMS = frozenset([
     'stand_z', 'step_height', 'step_length', 'step_lateral', 'turn_gain', 'max_foot_offset',
     'gait_freq', 'gait_type', 'shift_frac', 'shift_overlap',
     'balance_enabled', 'balance_gain_lateral', 'balance_gain_fore_aft', 'balance_max_shift',
+    'crawl8_shift_fwd', 'crawl8_shift_back', 'crawl8_shift_side',
     'ik_x_forward_sign', 'stance_x_front', 'stance_x_rear', 'stance_y', 'settle_speed',
     *(f'trim_{leg.lower()}' for leg in ('FL', 'FR', 'RL', 'RR')),
     'level_enabled', 'imu_timeout_s', 'imu_roll_sign', 'imu_pitch_sign', 'imu_swap_roll_pitch',
@@ -329,13 +340,16 @@ class GaitNode(Node):
         self.declare_parameter('odom_scale', 1.0)         # measured / estimated distance walked
         self.declare_parameter('armed_topic', '/spotmicro_move/armed')
         self.declare_parameter('gait_freq', 1.0)          # full step cycles per second at any commanded speed
-        self.declare_parameter('gait_type', 'crawl')      # 'crawl' (one leg at a time) or 'trot'
+        self.declare_parameter('gait_type', 'crawl')      # 'crawl' / 'crawl8' (one leg at a time) or 'trot'
         self.declare_parameter('shift_frac', 0.35)        # fraction of each leg's slot with 4 feet down, shifting body
         self.declare_parameter('shift_overlap', 0.4)      # fraction of a swing the body slide may spill into
         self.declare_parameter('balance_enabled', True)
         self.declare_parameter('balance_gain_lateral', 1.0)   # x centroid of the 3 support feet, side to side
         self.declare_parameter('balance_gain_fore_aft', 0.0)  # x centroid, front/back (needs ik_x_forward_sign right)
         self.declare_parameter('balance_max_shift', 40.0)     # mm clamp per axis
+        self.declare_parameter('crawl8_shift_fwd', 35.0)      # mm body forward while a rear leg swings
+        self.declare_parameter('crawl8_shift_back', 5.0)      # mm body back while a front leg swings
+        self.declare_parameter('crawl8_shift_side', 15.0)     # mm body away from the swinging leg
         self.declare_parameter('ik_x_forward_sign', -1.0)     # +1 if IK +x is body-forward, -1 if backward
 
         # Neutral foot placement (mm, per-leg IK frame: +x forward, +y away from the body).
@@ -611,16 +625,24 @@ class GaitNode(Node):
         self._gait_freq = max(float(p('gait_freq').value), 1e-3)
         gait_type = str(p('gait_type').value)
         self._gait_offsets, self._slot_frac = GAITS[gait_type]
-        # Trot keeps its old timing: no four-feet-down shift window.
-        self._shift_frac = min(max(float(p('shift_frac').value), 0.0), 0.9) if gait_type == 'crawl' else 0.0
-        self._shift_overlap = min(max(float(p('shift_overlap').value), 0.0), 0.5)
+        # Trot keeps its old timing: no four-feet-down shift window. crawl8 is
+        # fixed 8 equal phases: half of each slot shifting, half swinging, no overlap.
+        self._crawl8 = gait_type == 'crawl8'
+        if self._crawl8:
+            self._shift_frac, self._shift_overlap = 0.5, 0.0
+        else:
+            self._shift_frac = min(max(float(p('shift_frac').value), 0.0), 0.9) if gait_type == 'crawl' else 0.0
+            self._shift_overlap = min(max(float(p('shift_overlap').value), 0.0), 0.5)
         self._swing_start = self._slot_frac * self._shift_frac   # leg-local phase where swing begins
         # Legs in the order they swing, for looking up the previous slot's shift target.
         self._swing_order = sorted(self._gait_offsets, key=self._gait_offsets.get)
-        self._balance = bool(p('balance_enabled').value) and gait_type == 'crawl'
+        self._balance = bool(p('balance_enabled').value) and gait_type in CRAWLS
         self._bal_gain_y = float(p('balance_gain_lateral').value)
         self._bal_gain_x = float(p('balance_gain_fore_aft').value)
         self._bal_max = float(p('balance_max_shift').value)
+        self._c8_fwd = float(p('crawl8_shift_fwd').value)
+        self._c8_back = float(p('crawl8_shift_back').value)
+        self._c8_side = float(p('crawl8_shift_side').value)
         self._ik_x_sign = 1.0 if float(p('ik_x_forward_sign').value) >= 0 else -1.0
         self._stance_x_front = float(p('stance_x_front').value)
         self._stance_x_rear = float(p('stance_x_rear').value)
@@ -921,8 +943,9 @@ class GaitNode(Node):
             self._sentry_tick(joy, now, dt)
             return
 
-        # Stick-up reads as negative from the Deck, so flip it: forward = +.
-        vx = -_deadzone(joy.axes[_AX['left_y']], self._deadzone)
+        # The Deck app already sends stick-up as + (steamdeck_app input.rs), so
+        # forward = + here, the same sign as nav_node's cmd_vel linear.x.
+        vx = _deadzone(joy.axes[_AX['left_y']], self._deadzone)
         vy = _deadzone(joy.axes[_AX['left_x']], self._deadzone)     # strafe left = +
         wz = _deadzone(joy.axes[_AX['right_x']], self._deadzone)    # turn = +
         scale = self._speed_scale
@@ -1122,9 +1145,13 @@ class GaitNode(Node):
     def _shift_target(self, leg):
         """Body shift (bx forward, by left, mm, body frame) that puts the centre
         of mass over the three feet left down while `leg` swings: the centroid
-        of the other three corners of the foot rectangle, i.e. -(corner)/3."""
+        of the other three corners of the foot rectangle, i.e. -(corner)/3.
+        crawl8 uses mike4192's fixed, front/back-asymmetric amounts instead."""
         sx = 1.0 if leg in FRONT else -1.0
         sy = 1.0 if leg in LEFT_SIDE else -1.0
+        if self._crawl8:
+            bx = -self._c8_back if leg in FRONT else self._c8_fwd
+            return bx, -sy * self._c8_side
         half_w = self._half_width + self._stance_y
         bx = -self._bal_gain_x * sx * self._half_length / 3.0
         by = -self._bal_gain_y * sy * half_w / 3.0
@@ -1194,14 +1221,16 @@ class GaitNode(Node):
         mag = math.sqrt(vx * vx + vy * vy + wz * wz)
         if mag > 1.0:
             vx, vy, wz = vx / mag, vy / mag, wz / mag
-        stride_x = self._step_length * vx
+        # stride_x is in IK x (ik_x_sign maps body-forward onto it); fwd is body frame.
+        fwd = self._step_length * vx
+        stride_x = self._ik_x_sign * fwd
         stride_y = self._step_lateral * vy
         bx, by = self._body_shift(phase, period)
 
         swing_len = self._slot_frac - self._swing_start
         stance_len = 1.0 - swing_len
         k = 2e-3 * self._gait_freq * self._gait_rate / stance_len * self._odom_scale   # mm stride -> m/s
-        self._odom_v = (stride_x * k, stride_y * k)
+        self._odom_v = (fwd * k, stride_y * k)
         if self._stabilising() and self._walk_com_gain != 0.0:
             # Lean the body away from the side it is tipping toward (+roll =
             # right side down -> shift left; +pitch = nose down -> shift back).
@@ -1235,9 +1264,8 @@ class GaitNode(Node):
 
             tx, ty = self._turn_offset(leg, wz, s)
             # IK y is per-leg "outward", so a body-frame strafe is +y on the
-            # left legs and -y on the right legs. stride_x deliberately does NOT
-            # go through ik_x_sign: applying it (2026-10-13) made a forward
-            # stick walk backward on the real robot.
+            # left legs and -y on the right legs. stride_x goes through ik_x_sign
+            # (IK +x points backward): a stance foot sweeps toward the rear.
             dx = stride_x * s + tx
             dy = side * stride_y * s + ty
             r = math.hypot(dx, dy)

@@ -33,7 +33,8 @@
       max_foot_offset: 70.0   # mm hard clamp on each foot's horizontal stride offset (stride + turn combined)
       speed_scale: 0.8        # multiplies stick input -> stride (0.5 halved step_length to ±20mm: no net motion)
       gait_freq: 0.45          # step cycles per second (was 0.50; slowed so the longer shift_frac doesn't shorten the swing)
-      gait_type: "crawl"      # "crawl" = one leg lifted at a time (RL, FL, RR, FR); "trot" = diagonal pairs
+      gait_type: "crawl"      # "crawl" = one leg lifted at a time (RL, FL, RR, FR); "trot" = diagonal pairs;
+                              # "crawl8" = mike4192's 8-phase crawl (try with gait_freq ~0.35)
       odom_scale: 1.0         # odometry: real distance walked / estimated (walk 1 m, compare, adjust for slip)
 
       # Balance shift (crawl only): before each leg lifts, slide the body toward the
@@ -44,7 +45,14 @@
       balance_gain_lateral: 0.35  # (was 1.0) 1.0 = all the way to the support-triangle centroid (~32mm side to side)
       balance_gain_fore_aft: 0.35 # front/back part of the shift (~31mm at 1.0); off until ik_x_forward_sign is confirmed
       balance_max_shift: 20.0     # mm clamp per axis
-      ik_x_forward_sign: -1.0     # -1 = IK +x points backward (see stance comment below); flip if fore/aft shift goes the wrong way
+      # crawl8 ignores shift_frac/shift_overlap/balance gains (fixed 8 equal phases) and
+      # shifts the body by these fixed amounts instead (mike4192's values). Fore/aft still
+      # goes through ik_x_forward_sign.
+      crawl8_shift_fwd: 35.0      # mm body forward while a rear leg swings
+      crawl8_shift_back: 5.0      # mm body back while a front leg swings
+      crawl8_shift_side: 15.0     # mm body away from the swinging leg
+      ik_x_forward_sign: -1.0     # -1 = IK +x points backward (see stance comment below). Also sets the walking
+                                  # direction (stick and auto nav both use it), so flipping it reverses walking too
 
       # Neutral foot placement (mm). IK frame per leg: +y = away from the body (x sign: see below).
       # IK +x appears to point BACKWARD (knees are on the +x side), so a negative x puts a foot forward.
@@ -68,7 +76,7 @@
       # IMU body leveling (BNO055 fused orientation). Roll/pitch are integrated into
       # per-leg height offsets. Check signs on arm: the node logs roll/pitch, expected
       # +roll = right side down, +pitch = nose down. Flip a sign (or swap) if not.
-      level_enabled: true
+      level_enabled: false
       imu_topic: "/spotmicro_imu/imu/data"
       imu_timeout_s: 0.5
       imu_roll_sign: 1.0
@@ -84,7 +92,7 @@
       # Walking stabilisation (only with level_enabled): while walking the IMU also drives a
       # fast tilt correction (PD), leans the body away from the side it tips toward, slows the
       # steps when it tips a lot, and holds the heading while the turn stick is centred.
-      walk_stab_enabled: true
+      walk_stab_enabled: false
       walk_level_kp: 1.0          # deg of correction per deg of tilt
       walk_level_kd: 0.05         # deg of correction per deg/s of tilt rate (gyro) — raise slowly, jitters if high
       walk_level_filter_s: 0.4    # low-pass on tilt for the integral / lean / slow-down (ignores per-step rock)

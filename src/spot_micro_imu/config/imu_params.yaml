@@ -6,5 +6,5 @@
       # Body-frame mount correction (see spot_micro_imu/mount.py). Written by the IMU
       # zero (Deck: hold Y + D-pad down) and axis calibration (Y + D-pad left) — no need
       # to edit by hand. [1, 0, 0, 0] = the chip's axes are the robot's.
-      mount_quaternion: [0.024914, 0.019871, -0.08638, -0.995752]
-      yaw_offset_deg: 44.579
+      mount_quaternion: [0.024279, 0.003819, -0.066517, -0.997483]
+      yaw_offset_deg: -177.218
