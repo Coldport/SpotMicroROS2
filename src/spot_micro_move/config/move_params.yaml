@@ -26,21 +26,21 @@
       stick_deadzone: 0.50
 
       stand_z: 100.0         # mm, starting body height (standing AND stepping) — R1/L1 adjust live
-      step_height: 50.0       # mm foot lift during swing (90 dwarfed the stride — looked like marching in place)
+      step_height: 90.0       # mm foot lift during swing (90 dwarfed the stride — looked like marching in place)
       step_length: 60.0       # mm max fore/aft stride at full stick (±50; FL thigh clamps at 0° past ~55)
       step_lateral: 25.0      # mm max lateral stride at full stick (was 500 — threw the legs out of reach)
-      turn_gain: 50.0         # mm of arc each foot sweeps per half stride at full turn stick (feet now follow a circle)
+      turn_gain: 60.0         # mm of arc each foot sweeps per half stride at full turn stick (feet now follow a circle)
       max_foot_offset: 70.0   # mm hard clamp on each foot's horizontal stride offset (stride + turn combined)
       speed_scale: 0.8        # multiplies stick input -> stride (0.5 halved step_length to ±20mm: no net motion)
       gait_freq: 0.45          # step cycles per second (was 0.50; slowed so the longer shift_frac doesn't shorten the swing)
-      gait_type: "crawl"      # "crawl" = one leg lifted at a time (RL, FL, RR, FR); "trot" = diagonal pairs;
+      gait_type: "crawl8"     # "crawl" = one leg lifted at a time (RL, FL, RR, FR); "trot" = diagonal pairs;
                               # "crawl8" = mike4192's 8-phase crawl (try with gait_freq ~0.35)
-      odom_scale: 1.0         # odometry: real distance walked / estimated (walk 1 m, compare, adjust for slip)
+      odom_scale: 1.118       # odometry: real distance walked / estimated (walk 1 m, compare, adjust for slip)
 
       # Balance shift (crawl only): before each leg lifts, slide the body toward the
       # three feet that stay down so it doesn't tip over the support diagonal.
       shift_frac: 0.25            # (was 0.35) of each leg's 1/4-cycle slot: 4 feet down while the body shifts; rest = swing
-      shift_overlap: 0.4          # fraction of a swing the body slide spills into (foot barely up then); 0 = old stop-start
+      shift_overlap: 0.2          # fraction of a swing the body slide spills into (foot barely up then); 0 = old stop-start
       balance_enabled: true
       balance_gain_lateral: 0.35  # (was 1.0) 1.0 = all the way to the support-triangle centroid (~32mm side to side)
       balance_gain_fore_aft: 0.35 # front/back part of the shift (~31mm at 1.0); off until ik_x_forward_sign is confirmed
@@ -48,9 +48,15 @@
       # crawl8 ignores shift_frac/shift_overlap/balance gains (fixed 8 equal phases) and
       # shifts the body by these fixed amounts instead (mike4192's values). Fore/aft still
       # goes through ik_x_forward_sign.
-      crawl8_shift_fwd: 35.0      # mm body forward while a rear leg swings
+      crawl8_shift_fwd: 40.0      # mm body forward while a rear leg swings
       crawl8_shift_back: 5.0      # mm body back while a front leg swings
-      crawl8_shift_side: 15.0     # mm body away from the swinging leg
+      crawl8_shift_side: 30.0     # mm body away from the swinging leg
+      # Sway shape (crawl/crawl8). "step": slide to each target, hold through the swing
+      # (quick slides = sharp jolts on the camera). "sine": one smooth curve through the
+      # same targets (mid-swing): side to side ~15x gentler; front/back only speeds the
+      # body up / slows it down, never reverses it. Stop walking to switch.
+      sway_profile: "sine"
+      sway_fwd_vel_frac: 0.9      # sine: fore/aft sway peak speed / walking speed (>1 lets it reverse)
       ik_x_forward_sign: -1.0     # -1 = IK +x points backward (see stance comment below). Also sets the walking
                                   # direction (stick and auto nav both use it), so flipping it reverses walking too
 
@@ -58,9 +64,9 @@
       # IK +x appears to point BACKWARD (knees are on the +x side), so a negative x puts a foot forward.
       # Both 0 = feet under the shoulders, the calibration-verified pose (was front -50 / rear +50,
       # which drove the front thighs ~22 deg off the rear ones and slanted the body).
-      stance_x_front: 15.0    # +50 = feet 5cm back (was 0.0, before that -50.0)
-      stance_x_rear: 20.0     # +50 = feet 5cm back (was 0.0)
-      stance_y: 5.0           # all feet this far outward
+      stance_x_front: 5.0     # +50 = feet 5cm back (was 0.0, before that -50.0)
+      stance_x_rear: 40.0     # +50 = feet 5cm back (was 0.0)
+      stance_y: 15.0          # all feet this far outward
       settle_speed: 70.0      # mm/s max foot speed when returning to stand (slow leg descent on stop)
       # Static per-leg foot trim, [x, y, z] mm, added to every command for that leg.
       #   x: same sign as stance_x_* above (tune by eye: nudge 5mm, check the direction)
@@ -76,7 +82,7 @@
       # IMU body leveling (BNO055 fused orientation). Roll/pitch are integrated into
       # per-leg height offsets. Check signs on arm: the node logs roll/pitch, expected
       # +roll = right side down, +pitch = nose down. Flip a sign (or swap) if not.
-      level_enabled: false
+      level_enabled: true
       imu_topic: "/spotmicro_imu/imu/data"
       imu_timeout_s: 0.5
       imu_roll_sign: 1.0
@@ -85,23 +91,23 @@
       level_trim_roll: 0.0    # deg, IMU reading that should count as level — keep 0 and use the IMU zero (Y + D-pad down) instead
       level_trim_pitch: 0.0
       level_gain: 5.0         # 1/s, integral gain on tilt error
-      level_max_deg: 8.0      # clamp on correction angle
+      level_max_deg: 20.0     # clamp on correction angle
       level_deadband_deg: 0.5
       level_half_length: 93.0 # mm, body centre -> front/rear hip
       level_half_width: 80.0  # mm, body centre -> foot laterally
       # Walking stabilisation (only with level_enabled): while walking the IMU also drives a
       # fast tilt correction (PD), leans the body away from the side it tips toward, slows the
       # steps when it tips a lot, and holds the heading while the turn stick is centred.
-      walk_stab_enabled: false
-      walk_level_kp: 1.0          # deg of correction per deg of tilt
-      walk_level_kd: 0.05         # deg of correction per deg/s of tilt rate (gyro) — raise slowly, jitters if high
+      walk_stab_enabled: true
+      walk_level_kp: 1.2          # deg of correction per deg of tilt
+      walk_level_kd: 0.09         # deg of correction per deg/s of tilt rate (gyro) — raise slowly, jitters if high
       walk_level_filter_s: 0.4    # low-pass on tilt for the integral / lean / slow-down (ignores per-step rock)
-      walk_com_gain: 2.25         # mm of body shift per deg of filtered tilt
+      walk_com_gain: 3.5          # mm of body shift per deg of filtered tilt
       walk_com_max: 15.0          # mm clamp per axis
-      walk_tilt_slow_deg: 7.0     # filtered tilt where the steps start to slow ...
+      walk_tilt_slow_deg: 8.0     # filtered tilt where the steps start to slow ...
       walk_tilt_stop_deg: 14.0    # ... down to walk_min_speed of the normal rate here
       walk_min_speed: 0.35
-      walk_heading_gain: 1.1      # turn (stick units) per rad of heading drift; 0 = no heading hold
+      walk_heading_gain: 1.4      # turn (stick units) per rad of heading drift; 0 = no heading hold
       walk_heading_max: 0.3       # clamp on that turn
 
       # Modes (once armed). Double-tap sentry_button: SENTRY — feet stay planted, left stick
@@ -112,17 +118,17 @@
       mode_topic: "/spotmicro_move/mode"
       sentry_button: "y"
       double_tap_s: 0.4
-      sentry_max_roll_deg: 24.0
-      sentry_max_pitch_deg: 29.0
-      sentry_max_yaw_deg: 26.0
+      sentry_max_roll_deg: 20.0
+      sentry_max_pitch_deg: 25.0
+      sentry_max_yaw_deg: 25.0
       sentry_rate_deg_s: 75.0     # how fast the body follows the sticks
       sentry_foot_speed: 200.0    # mm/s cap on foot motion while posing
       # Sentry object tracking: pick a target on the Deck's camera view (touch-drag a box, or
       # D-pad + A); track_node (track_params.yaml) follows it and the body yaws/pitches to
       # keep it centred. X on the Deck stops it.
       track_topic: "/spotmicro_track/status"
-      track_gain: 1.5             # deg/s of body pose per deg the target is off-centre
-      track_deadband_deg: 1.5
+      track_gain: 1.9             # deg/s of body pose per deg the target is off-centre
+      track_deadband_deg: 2.5
       track_timeout_s: 0.5        # tracker status older than this = not tracking (hold the pose)
       calib_buttons: ["y", "dpad_up"]
       calib_hold_s: 3.0
@@ -163,3 +169,17 @@
       cmd_vel_topic: "/spotmicro_move/cmd_vel"
       cmd_vel_timeout_s: 0.6
       cmd_vel_turn_sign: 1.0
+      turn_scale: 0.92        # real / modelled turn rate, for auto nav's turn commands (autotune measures it)
+      walk_turn_trim: -0.069  # turn stick added per unit of forward stick to cancel a veer (autotune sets it)
+
+      # Tune screen on the Deck (back grip buttons): autotune walks this course by itself and
+      # sets odom_scale, balance sway, cmd_vel_turn_sign, turn_scale and walk_turn_trim.
+      # Needs the lidar (stack running) and this much room: distance + ~0.35 m in front.
+      tune_cmd_topic: "/spotmicro_move/tune_cmd"
+      scan_topic: "/scan"
+      tune_distance_m: 1.0        # walk this far forward, then back
+      tune_strafe_cycles: 2.0     # step cycles left, then right
+      tune_turn_deg: 180.0        # turn this far left, then right
+      tune_stick: 1.0             # stick deflection the course walks at (speed_scale still applies)
+      tune_min_clearance_m: 0.3   # stop a test when the lidar sees something this close in the way
+      tune_body_radius_m: 0.2     # lidar returns this close to the body centre are the robot itself

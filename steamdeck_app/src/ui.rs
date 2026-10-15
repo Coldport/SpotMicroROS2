@@ -21,6 +21,7 @@ use crate::navview::{NavCam, Place};
 use crate::protocol::{MapData, ScanData, BUTTON_NAMES};
 use crate::shared::{CameraInfo, Frame, ModeInfo, RobotState, SettingItem, TrackStatus, View};
 use crate::track::{self, TrackPick};
+use crate::tune::{self, Page, TuneCtx, TuneScreen};
 use crate::text::{Fonts, Weight};
 
 pub const LOGICAL_W: u32 = 1280;
@@ -81,6 +82,8 @@ pub struct Snapshot {
     pub settings_age: f32,
     /// Wi-Fi setup over Bluetooth (bt.rs).
     pub provision: Provision,
+    /// Some while the Tune screen is open.
+    pub tune: Option<(TuneScreen, TuneCtx)>,
 }
 
 impl Snapshot {
@@ -267,6 +270,14 @@ impl Ui {
         canvas.set_blend_mode(BlendMode::Blend);
         canvas.set_draw_color(BG);
         canvas.clear();
+
+        if let Some((screen, ctx)) = &snap.tune {
+            self.draw_top_bar(canvas, snap);
+            self.draw_tune(canvas, snap, screen, ctx);
+            self.draw_overlay(canvas, snap, false, true);
+            self.draw_toast(canvas, menu, LOGICAL_H as i32 - M - 38 - 56);
+            return;
+        }
 
         if let Some(cam) = &snap.nav_cam {
             self.draw_nav(canvas, tc, snap, cam);
@@ -978,7 +989,8 @@ impl Ui {
         self.circle(canvas, 26, 28, 12, with_alpha(ACCENT, 60), true);
         self.text(canvas, "SpotMicro", 46, 15, Weight::Bold, 22, TEXT);
 
-        // view switcher: [L2] ( Camera | Depth | Lidar | Map ); in auto nav L2 zooms instead.
+        // view switcher: [L2] ( Camera | Depth | Lidar | Map ) [R2]; in auto nav they zoom instead.
+        let mut left_end = 0;
         if snap.nav_cam.is_some() {
             let tw = self.font.width("Auto nav map", Weight::Bold, 14);
             let hw = self.font.width("A×2 to exit", Weight::Regular, 14);
@@ -986,7 +998,7 @@ impl Ui {
             self.text(canvas, "Auto nav map", 186 + 16, 19, Weight::Bold, 14, TEXT);
             self.text(canvas, "A×2 to exit", 186 + 28 + tw, 19, Weight::Regular, 14, MUTED);
         } else {
-            self.draw_view_switcher(canvas, snap, 186);
+            left_end = self.draw_view_switcher(canvas, snap, 186);
         }
 
         // status pills, right to left
@@ -1035,11 +1047,15 @@ impl Ui {
         }
         if snap.video_fps > 0.0 && snap.view.is_video() && snap.frame_age < 2.0 {
             let s = format!("{:.0} fps · {:.0} ms", snap.video_fps, snap.decode_ms);
-            self.text_right(canvas, &s, right - 4, 19, Weight::Regular, 14, MUTED);
+            // Only if it fits: with many status pills it would run into the view switcher.
+            if right - 4 - self.font.width(&s, Weight::Regular, 14) > left_end + 12 {
+                self.text_right(canvas, &s, right - 4, 19, Weight::Regular, 14, MUTED);
+            }
         }
     }
 
-    fn draw_view_switcher(&mut self, canvas: &mut Canvas<Window>, snap: &Snapshot, mut x: i32) {
+    /// Draws `[L2] ( Camera | Depth | Lidar | Map ) [R2]` from `x`; returns its right edge.
+    fn draw_view_switcher(&mut self, canvas: &mut Canvas<Window>, snap: &Snapshot, mut x: i32) -> i32 {
         x += self.keycap(canvas, "L2", "", x, 17) + 8;
         let depth_ok = snap.depth_available();
         let widths: Vec<i32> = View::ALL.iter().map(|v| self.font.width(v.label(), Weight::Bold, 14) + 28).collect();
@@ -1061,6 +1077,7 @@ impl Ui {
             self.text_center(canvas, v.label(), tx + w / 2, 19, Weight::Bold, 14, color);
             tx += w;
         }
+        x + total + 8 + self.keycap(canvas, "R2", "", x + total + 8, 17)
     }
 
     fn draw_horizon(&mut self, canvas: &mut Canvas<Window>, r: Rect, roll: Option<f32>, pitch: Option<f32>) {
@@ -1289,7 +1306,7 @@ impl Ui {
                 Some("lost") => ("Target lost — holding, still looking".to_string(), WARN),
                 Some(_) => ("Locking on…".to_string(), ACCENT),
                 None if snap.track_pick.is_some() => ("Tap or drag on the picture to track something".to_string(), MUTED),
-                None => ("Switch to the camera view (L2) to track something".to_string(), MUTED),
+                None => ("Switch to the camera view (R2) to track something".to_string(), MUTED),
             };
             let st = self.font.fit(&status.0, Weight::Regular, 14, w / 2);
             self.text_right(canvas, &st, r.right() - 16, r.y() + 11, Weight::Regular, 14, status.1);
@@ -1424,7 +1441,7 @@ impl Ui {
 
         let items = &snap.settings;
         let gait = snap.fresh_state().and_then(|s| s.gait.clone());
-        let (sub, sc) = if items.is_empty() || snap.settings_age > 5.0 {
+        let (sub, sc) = if crate::menu::robot_items_missing(items) || snap.settings_age > 5.0 {
             ("Waiting for the robot…".to_string(), WARN)
         } else if gait.as_ref().map(|g| g.running).unwrap_or(false) {
             ("Live — changes apply instantly, until the stack restarts".to_string(), GOOD)
@@ -1627,6 +1644,9 @@ impl Ui {
                     ("R1", "Raise body", "hold"),
                     ("L1", "Lower body", "hold"),
                 ]),
+                ("Tune & calibrate", &[
+                    ("L4 / R4", "Tune & calibrate", "auto-tune, servos — or A on this screen"),
+                ]),
             ],
             &[
                 ("Tricks — armed, walking", &[
@@ -1655,10 +1675,10 @@ impl Ui {
                     ("Y + ←", "Calibrate IMU axes", "hold 1 s; follow the prompts"),
                 ]),
                 ("This app", &[
-                    ("L2", "Next view", "camera, depth, lidar, map"),
+                    ("R2 / L2", "Next / previous view", "camera, depth, lidar, map"),
                     ("☰", "Settings", "D-pad + A"),
                     ("View", "Show / hide this screen", ""),
-                    ("X", "Wi-Fi setup over Bluetooth", "only while not connected"),
+                    ("☰", "Wi-Fi setup over Bluetooth", "Settings → Connection, A ×2"),
                 ]),
             ],
         ];
@@ -1695,23 +1715,416 @@ impl Ui {
         self.keycap(canvas, "View", "Close", r.right() - 120, fy);
     }
 
+    // ── Tune screen ──────────────────────────────────────────────────────────
+
+    /// Full-screen autotune / servo calibration (tune.rs has the controls).
+    fn draw_tune(&mut self, canvas: &mut Canvas<Window>, snap: &Snapshot, screen: &TuneScreen, ctx: &TuneCtx) {
+        let r = Rect::new(M, TOP_H + M, LOGICAL_W - 2 * M as u32, LOGICAL_H - (TOP_H + 2 * M) as u32);
+        self.fill_round(canvas, r, RADIUS, Color::RGBA(15, 19, 27, 250));
+        canvas.set_draw_color(HAIRLINE);
+        let _ = canvas.draw_line(Point::new(r.x() + RADIUS, r.y()), Point::new(r.right() - RADIUS, r.y()));
+        let title = match screen.page {
+            Page::Home => "Tune & calibrate",
+            Page::Auto => "Auto-tune walking",
+            Page::Servo => "Servo calibration",
+        };
+        self.text(canvas, title, r.x() + 24, r.y() + 18, Weight::Bold, 28, TEXT);
+        let running = snap.fresh_state().and_then(|s| s.gait.as_ref()).is_some_and(|g| g.running);
+        let (status, sc) = if snap.fresh_state().is_none() {
+            ("Waiting for the robot…".to_string(), WARN)
+        } else if !running {
+            ("Gait node off — hold L1+R1 to start the stack".to_string(), WARN)
+        } else if !ctx.armed {
+            ("Disarmed — hold L3+R3 to arm (B is still the emergency stop)".to_string(), WARN)
+        } else if ctx.running() {
+            ("Autotune running — touch a stick or press B to stop".to_string(), ACCENT)
+        } else {
+            ("Armed — B is the emergency stop".to_string(), GOOD)
+        };
+        self.circle(canvas, r.x() + 29, r.y() + 66, 4, sc, false);
+        self.text(canvas, &status, r.x() + 40, r.y() + 58, Weight::Regular, 14, MUTED);
+
+        let body = Rect::new(r.x() + 24, r.y() + 96, r.width() - 48, r.height() - 96 - 64);
+        let keys: Vec<(&str, String)> = match screen.page {
+            Page::Home => {
+                self.draw_tune_home(canvas, body, screen, ctx);
+                vec![("↑↓", "Select".into()), ("A", "Open".into()), ("Y", "Close".into())]
+            }
+            Page::Auto => {
+                self.draw_tune_auto(canvas, snap, body, ctx);
+                let t = ctx.tune.as_ref();
+                let mut k = if ctx.running() {
+                    vec![("A", "Stop".to_string())]
+                } else if t.is_some_and(|t| t.undecided()) {
+                    vec![("A", "Keep & save".to_string()), ("X", "Revert".to_string())]
+                } else {
+                    vec![("A", "Start".to_string())]
+                };
+                k.push(("Y", "Back".into()));
+                k
+            }
+            Page::Servo => {
+                self.draw_tune_servo(canvas, body, screen, ctx);
+                if ctx.mode != "servo_cal" {
+                    vec![("A", "Start".into()), ("Y", "Back".into())]
+                } else if screen.on_joint {
+                    vec![("↑↓", "Move joint".into()), ("←→", "Really at".into()), ("A", "Record point".into()),
+                         ("X", "Apply fit".into()), ("Y", "Done".into())]
+                } else {
+                    vec![("D-pad", "Pick joint".into()), ("A", "Measure it".into()), ("X", "Clear points".into()),
+                         ("Y", "Back (saves)".into())]
+                }
+            }
+        };
+        let fy = r.bottom() - 46;
+        canvas.set_draw_color(HAIRLINE);
+        let _ = canvas.draw_line(Point::new(r.x() + 16, fy - 10), Point::new(r.right() - 16, fy - 10));
+        let mut x = r.x() + 24;
+        for (k, l) in &keys {
+            x += self.keycap(canvas, k, l, x, fy) + 20;
+        }
+        self.keycap(canvas, "L4 / R4", "Close", r.right() - 150, fy);
+    }
+
+    fn draw_tune_home(&mut self, canvas: &mut Canvas<Window>, body: Rect, screen: &TuneScreen, ctx: &TuneCtx) {
+        let w = (body.width() as i32 - 24) / 2;
+        let last = ctx.tune.as_ref().map(|t| {
+            let n = t.changes.len();
+            let what = match t.state.as_str() {
+                "running" => "running now".to_string(),
+                "done" => format!("done, {n} change{}", if n == 1 { "" } else { "s" }),
+                other => other.to_string(),
+            };
+            let outcome = match t.outcome.as_str() {
+                "kept" => " — kept",
+                "reverted" => " — reverted",
+                _ if t.undecided() => " — keep or revert?",
+                _ => "",
+            };
+            format!("Last run: {what}{outcome}")
+        });
+        let cards: [(&str, &str, &str, Option<String>); 2] = [
+            ("Auto-tune walking",
+             "Walks 1 m forward and back, two steps left and right, then half a turn each way, and tunes the walk \
+              from what the IMU and lidar saw: odometry scale, body sway, turn sign and rate, and a trim so it \
+              walks straight.",
+             "Needs: armed, flat floor, ~1.4 m clear in front, the lidar running (L1+R1 stack). \
+              Changes are live at once; keep or revert them at the end.",
+             last),
+            ("Calibrate servos",
+             "Two-point calibration, one joint at a time: move the joint, say what angle it really sits at, \
+              then again at a second angle. Fixes each servo's offset and how far it turns per degree.",
+             "Put the robot on a stand: joints move one at a time and the feet go to the calibration pose. \
+              Saved to servo_calibration.yaml when you leave.",
+             None),
+        ];
+        for (i, (title, text, need, extra)) in cards.iter().enumerate() {
+            let cr = Rect::new(body.x() + i as i32 * (w + 24), body.y() + 20, w as u32, 420);
+            let sel = screen.home_sel == i;
+            self.fill_round(canvas, cr, RADIUS, if sel { with_alpha(ACCENT, 40) } else { SURFACE });
+            if sel {
+                self.fill_round(canvas, Rect::new(cr.x(), cr.y() + 18, 4, cr.height() - 36), 2, ACCENT);
+            }
+            self.text(canvas, title, cr.x() + 28, cr.y() + 26, Weight::Bold, 24, if sel { TEXT } else { MUTED });
+            let mut y = cr.y() + 76;
+            for line in self.font.wrap(text, Weight::Regular, 16, w - 56) {
+                self.text(canvas, &line, cr.x() + 28, y, Weight::Regular, 16, TEXT);
+                y += 24;
+            }
+            y += 14;
+            for line in self.font.wrap(need, Weight::Regular, 14, w - 56) {
+                self.text(canvas, &line, cr.x() + 28, y, Weight::Regular, 14, MUTED);
+                y += 20;
+            }
+            if let Some(e) = extra {
+                let c = if ctx.tune.as_ref().is_some_and(|t| t.undecided()) { WARN } else { ACCENT };
+                self.text(canvas, e, cr.x() + 28, cr.bottom() - 44, Weight::Bold, 16, c);
+            }
+        }
+    }
+
+    fn draw_tune_auto(&mut self, canvas: &mut Canvas<Window>, snap: &Snapshot, body: Rect, ctx: &TuneCtx) {
+        const COURSE: [(&str, &str); 8] = [
+            ("forward", "Walk forward"),
+            ("back", "Walk back"),
+            ("left", "Two steps left"),
+            ("right", "Two steps right"),
+            ("adjust_walk", "Adjust walk settings"),
+            ("turn_left", "Half turn left"),
+            ("turn_right", "Half turn right"),
+            ("adjust_turn", "Adjust turn settings"),
+        ];
+        let t = ctx.tune.clone().unwrap_or_default();
+        let have = ctx.tune.is_some();
+        let lw = 500;
+        let x0 = body.x();
+        self.text(canvas, "COURSE", x0, body.y(), Weight::Bold, 12, ACCENT);
+        let mut y = body.y() + 28;
+        for (i, (name, label)) in COURSE.iter().enumerate() {
+            let seg = t.segments.iter().find(|s| s.name == *name);
+            let current = t.running() && t.test == *name;
+            let adjust_done = name.starts_with("adjust") && have && (t.step as usize > i + 1 || t.state == "done");
+            if current {
+                self.fill_round(canvas, Rect::new(x0 - 10, y - 6, lw as u32, 34), 8, with_alpha(ACCENT, 30));
+            }
+            // ✓ done, – skipped, filled dot = running now, ring = still to come.
+            if current {
+                self.circle(canvas, x0 + 8, y + 11, 6, ACCENT, false);
+            } else if seg.is_some_and(|s| s.skipped) {
+                self.text_center(canvas, "–", x0 + 8, y, Weight::Bold, 16, FAINT);
+            } else if seg.is_some() || adjust_done {
+                self.text_center(canvas, "✓", x0 + 8, y, Weight::Bold, 16, GOOD);
+            } else {
+                self.circle(canvas, x0 + 8, y + 11, 6, FAINT, true);
+            }
+            self.text(canvas, label, x0 + 28, y, Weight::Bold, 16, if current || seg.is_some() || adjust_done { TEXT } else { MUTED });
+            let detail = match seg {
+                Some(s) if s.skipped => s.note.clone(),
+                Some(s) if name.starts_with("turn") => s.yaw_deg.map(|d| format!("{:.0}° in {:.0} s", d.abs(), s.time_s.unwrap_or(0.0))).unwrap_or_default(),
+                Some(s) => match (s.real_m, s.est_m) {
+                    (Some(real), Some(est)) => format!("{:.2} m real / {:.2} m odometry", real, est),
+                    (None, Some(est)) => format!("{:.2} m odometry, not measured", est),
+                    _ => String::new(),
+                },
+                None => String::new(),
+            };
+            if !detail.is_empty() {
+                let d = self.font.fit(&detail, Weight::Regular, 14, lw - 240);
+                self.text_right(canvas, &d, x0 + lw - 20, y + 2, Weight::Regular, 14, MUTED);
+            }
+            y += 40;
+        }
+
+        // progress + what it is doing / did
+        y += 6;
+        self.fill_round(canvas, Rect::new(x0, y, lw as u32 - 20, 8), 4, TRACK);
+        if have {
+            let fw = ((lw - 20) as f32 * t.progress.clamp(0.0, 1.0)) as u32;
+            let c = match t.state.as_str() {
+                "failed" | "stopped" => WARN,
+                "done" => GOOD,
+                _ => ACCENT,
+            };
+            if fw > 8 {
+                self.fill_round(canvas, Rect::new(x0, y, fw, 8), 4, c);
+            }
+        }
+        y += 24;
+        let prompt = if !have {
+            "Stand the robot on flat floor facing the open space, arm it, then press A.".to_string()
+        } else {
+            match t.outcome.as_str() {
+                "kept" => "Kept — saved to move_params.yaml.".to_string(),
+                "reverted" => "Reverted — the old settings are back.".to_string(),
+                _ => t.prompt.clone(),
+            }
+        };
+        let pc = match t.state.as_str() {
+            "failed" | "stopped" if have => WARN,
+            _ => TEXT,
+        };
+        for line in self.font.wrap(&prompt, Weight::Bold, 16, lw - 20).iter().take(3) {
+            self.text(canvas, line, x0, y, Weight::Bold, 16, pc);
+            y += 22;
+        }
+
+        // changes and findings
+        let x1 = x0 + lw + 30;
+        let rw = body.right() - x1;
+        canvas.set_draw_color(HAIRLINE);
+        let _ = canvas.draw_line(Point::new(x1 - 16, body.y()), Point::new(x1 - 16, body.bottom()));
+        self.text(canvas, "CHANGES", x1, body.y(), Weight::Bold, 12, ACCENT);
+        let mut y = body.y() + 28;
+        if t.changes.is_empty() {
+            let msg = if !have {
+                "What the run changes shows up here — live at once, kept or reverted at the end."
+            } else if t.running() {
+                "None yet."
+            } else {
+                "No changes needed."
+            };
+            for line in self.font.wrap(msg, Weight::Regular, 14, rw) {
+                self.text(canvas, &line, x1, y, Weight::Regular, 14, MUTED);
+                y += 20;
+            }
+            y += 8;
+        }
+        for c in &t.changes {
+            let label = snap.settings.iter().find(|i| i.key == c.key).map(|i| i.label.clone()).unwrap_or_else(|| c.key.clone());
+            let fmt = |v: &serde_json::Value| match v.as_f64() {
+                Some(f) => {
+                    let s = format!("{f:.3}");
+                    s.trim_end_matches('0').trim_end_matches('.').to_string()
+                }
+                None => v.to_string(),
+            };
+            let vals = format!("{} → {}", fmt(&c.old), fmt(&c.new));
+            self.text(canvas, &label, x1, y, Weight::Bold, 16, TEXT);
+            self.text_right(canvas, &vals, x1 + rw, y, Weight::Bold, 16, if t.outcome == "reverted" { FAINT } else { ACCENT });
+            y += 22;
+            let why = self.font.fit(&c.why, Weight::Regular, 14, rw);
+            self.text(canvas, &why, x1, y, Weight::Regular, 14, MUTED);
+            y += 28;
+        }
+        if !t.findings.is_empty() {
+            y += 6;
+            self.text(canvas, "FINDINGS", x1, y, Weight::Bold, 12, ACCENT);
+            y += 26;
+            for f in &t.findings {
+                let lines = self.font.wrap(f, Weight::Regular, 14, rw - 18);
+                if y + lines.len() as i32 * 20 > body.bottom() {
+                    self.text(canvas, "…", x1, y, Weight::Regular, 14, MUTED);
+                    break;
+                }
+                self.circle(canvas, x1 + 4, y + 9, 3, WARN, false);
+                for line in lines {
+                    self.text(canvas, &line, x1 + 18, y, Weight::Regular, 14, TEXT);
+                    y += 20;
+                }
+                y += 6;
+            }
+        }
+    }
+
+    fn draw_tune_servo(&mut self, canvas: &mut Canvas<Window>, body: Rect, screen: &TuneScreen, ctx: &TuneCtx) {
+        const LEG_LABELS: [&str; 4] = ["Front left", "Front right", "Rear left", "Rear right"];
+        const JOINT_LABELS: [&str; 3] = ["Hip", "Thigh", "Knee"];
+        let info = ctx.servo.as_ref().filter(|_| ctx.mode == "servo_cal");
+        // grid: legs down, joints across
+        let (x0, y0, lab_w, cw, ch) = (body.x(), body.y() + 26, 112, 140, 88);
+        for (j, jl) in JOINT_LABELS.iter().enumerate() {
+            self.text_center(canvas, jl, x0 + lab_w + j as i32 * cw + cw / 2, body.y(), Weight::Bold, 14, MUTED);
+        }
+        for (l, ll) in LEG_LABELS.iter().enumerate() {
+            let cy = y0 + l as i32 * ch;
+            self.text(canvas, ll, x0, cy + ch / 2 - 12, Weight::Bold, 14, MUTED);
+            for j in 0..3 {
+                let cell = Rect::new(x0 + lab_w + j as i32 * cw + 4, cy + 4, cw as u32 - 8, ch as u32 - 8);
+                let sel = (screen.leg, screen.joint) == (l, j);
+                let fill = if sel && screen.on_joint { with_alpha(ACCENT, 90) } else if sel { with_alpha(ACCENT, 40) } else { SURFACE };
+                self.fill_round(canvas, cell, 10, fill);
+                if sel {
+                    self.fill_round(canvas, Rect::new(cell.x(), cell.y() + 12, 3, cell.height() - 24), 2, ACCENT);
+                }
+                let leg = tune::LEGS[l];
+                if let Some([off, sc]) = info.and_then(|i| i.cal.get(leg)).map(|c| c[j]) {
+                    self.text_center(canvas, &format!("{off:+.1}°"), cell.x() + cell.width() as i32 / 2, cell.y() + 14, Weight::Bold, 18, TEXT);
+                    let scale_c = if (sc - 1.0).abs() > 1e-4 { ACCENT } else { FAINT };
+                    self.text_center(canvas, &format!("×{sc:.3}"), cell.x() + cell.width() as i32 / 2, cell.y() + 44, Weight::Regular, 14, scale_c);
+                }
+                if info.is_some_and(|i| i.done.iter().any(|d| *d == format!("{leg} {}", tune::JOINTS[j]))) {
+                    self.text(canvas, "✓", cell.right() - 22, cell.y() + 6, Weight::Bold, 14, GOOD);
+                }
+            }
+        }
+
+        // the selected joint
+        let x1 = x0 + lab_w + 3 * cw + 36;
+        let rw = body.right() - x1;
+        canvas.set_draw_color(HAIRLINE);
+        let _ = canvas.draw_line(Point::new(x1 - 18, body.y()), Point::new(x1 - 18, body.bottom()));
+        let Some(info) = info else {
+            let msg = if ctx.armed {
+                "Starting servo calibration… (press A if nothing happens)"
+            } else {
+                "Arm the robot (hold L3+R3), then press A to start. Put it on a stand first."
+            };
+            for (i, line) in self.font.wrap(msg, Weight::Bold, 18, rw).iter().enumerate() {
+                self.text(canvas, line, x1, body.y() + i as i32 * 26, Weight::Bold, 18, WARN);
+            }
+            return;
+        };
+        let joint = tune::JOINTS[screen.joint];
+        let title = format!("{} · {}", LEG_LABELS[screen.leg], JOINT_LABELS[screen.joint]);
+        self.text(canvas, &title, x1, body.y() - 4, Weight::Bold, 24, TEXT);
+        let mut y = body.y() + 30;
+        for line in self.font.wrap(tune::joint_hint(joint), Weight::Regular, 14, rw) {
+            self.text(canvas, &line, x1, y, Weight::Regular, 14, MUTED);
+            y += 20;
+        }
+        y += 14;
+        let synced = info.leg == tune::LEGS[screen.leg] && info.joint == joint;
+        let deg = |v: Option<f32>| v.filter(|_| synced).map(|v| format!("{v:.1}°")).unwrap_or_else(|| "—".into());
+        let actual = screen.actual(ctx).filter(|_| synced);
+        let rows: [(&str, String, Color); 3] = [
+            ("Test angle", deg(info.target) + if info.moving && synced { "  moving…" } else { "" }, TEXT),
+            ("Really at", actual.map(|a| format!("{a:.1}°")).unwrap_or_else(|| "—".into()),
+             if screen.on_joint { ACCENT } else { TEXT }),
+            ("Servo gets", deg(info.servo), MUTED),
+        ];
+        for (label, value, c) in rows {
+            self.text(canvas, label, x1, y + 6, Weight::Regular, 16, MUTED);
+            self.text(canvas, &value, x1 + 150, y, Weight::Bold, 26, c);
+            if label == "Really at" && screen.on_joint {
+                self.text(canvas, "‹ ›", x1 + 300, y + 4, Weight::Bold, 18, ACCENT);
+                if screen.actual_delta != 0.0 {
+                    let d = format!("{:+.1}° from the test angle", screen.actual_delta);
+                    self.text(canvas, &d, x1 + 340, y + 8, Weight::Regular, 14, MUTED);
+                }
+            }
+            y += 44;
+        }
+        y += 6;
+        self.text(canvas, "POINTS", x1, y, Weight::Bold, 12, ACCENT);
+        y += 24;
+        for i in 0..2 {
+            let line = match info.points.get(i).filter(|_| synced) {
+                Some(p) => format!("{}:  servo {:.1}°  →  really {:.1}°", i + 1, p.servo, p.actual),
+                None => format!("{}:  —", i + 1),
+            };
+            self.text(canvas, &line, x1, y, Weight::Regular, 16, if info.points.len() > i { TEXT } else { FAINT });
+            y += 26;
+        }
+        y += 8;
+        let (fit, fc) = match info.fit.as_ref().filter(|_| synced) {
+            Some(f) if f.error.is_none() => (
+                format!("Fit: offset {:+.2}°, scale {:.3} — X to apply", f.offset.unwrap_or(0.0), f.scale.unwrap_or(1.0)),
+                GOOD,
+            ),
+            Some(_) if info.points.is_empty() => (
+                "Move the joint (↑↓) to an angle you can measure, set where it really is (←→), then A. \
+                 Then again at a second angle at least 15° away."
+                    .to_string(),
+                MUTED,
+            ),
+            Some(f) => (f.error.clone().unwrap_or_default(), WARN),
+            None => (String::new(), MUTED),
+        };
+        for line in self.font.wrap(&fit, Weight::Regular, 16, rw).iter().take(3) {
+            self.text(canvas, line, x1, y, Weight::Regular, 16, fc);
+            y += 22;
+        }
+        if !info.note.is_empty() {
+            y += 6;
+            let note = self.font.fit(&info.note, Weight::Regular, 14, rw);
+            self.text(canvas, &note, x1, y, Weight::Regular, 14, ACCENT);
+        }
+        if info.unsaved {
+            self.text_right(canvas, "unsaved — saves when you leave", body.right(), body.y(), Weight::Regular, 14, WARN);
+        }
+    }
+
     // ── messages ─────────────────────────────────────────────────────────────
 
     /// `nav`: the auto-nav map is up, so camera problems don't matter.
     fn draw_overlay(&mut self, canvas: &mut Canvas<Window>, snap: &Snapshot, menu_open: bool, nav: bool) {
         let bt = &snap.provision;
-        // Key + label drawn under the message, e.g. ("X", "Set up Wi-Fi over Bluetooth").
+        // Key + label drawn under the message, e.g. ("☰", "Settings → Wi-Fi setup over Bluetooth").
         let mut action: Option<(&str, &str)> = None;
         let message: Option<(String, String, Color)> = if bt.running {
             Some(("Wi-Fi setup over Bluetooth".into(), bt.step.clone(), ACCENT))
         } else if !snap.broker_connected {
             if let Some(err) = &bt.error {
-                action = Some(("X", "Try again"));
+                action = Some(if menu_open { ("A ×2", "Try again →") } else { ("☰", "Try again: Settings → Connection") });
                 Some(("Bluetooth setup failed".into(), err.clone(), BAD))
             } else if let Some(ip) = &bt.host {
                 Some((format!("Reconnecting to {ip}"), bt.step.clone(), ACCENT))
             } else {
-                action = Some(("X", "Not on the same Wi-Fi? Set it up over Bluetooth"));
+                action = Some(if menu_open {
+                    ("A ×2", "Set up Wi-Fi over Bluetooth →")
+                } else {
+                    ("☰", "Not on the same Wi-Fi? Settings → Wi-Fi setup over Bluetooth")
+                });
                 let detail = if snap.last_error.is_empty() {
                     "Is the robot on and the MQTT broker running?".to_string()
                 } else {
@@ -1770,7 +2183,10 @@ impl Ui {
             self.text_center(canvas, line, cx, r.y() + 70 + i as i32 * 22, Weight::Regular, 16, MUTED);
         }
         if let Some((key, label)) = action {
-            let kw = self.font.width(key, Weight::Bold, 12).max(12) + 14 + 6 + self.font.width(label, Weight::Regular, 14);
+            let key_w = self.font.width(key, Weight::Bold, 12).max(12) + 14 + 6;
+            let label = self.font.fit(label, Weight::Regular, 14, w - 48 - key_w);
+            let label = label.as_str();
+            let kw = key_w + self.font.width(label, Weight::Regular, 14);
             self.keycap(canvas, key, label, cx - kw / 2, r.bottom() - 46);
         }
     }

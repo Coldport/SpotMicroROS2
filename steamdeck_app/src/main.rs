@@ -3,6 +3,8 @@
 //! for the robot's live-tunable gait and video settings — all over MQTT. The
 //! View (⧉) button shows every control and trick trigger. In auto nav mode
 //! (A×2 on the robot) the screen becomes a map to pick goals on (navview.rs).
+//! A back grip button (L4/R4/L5/R5) opens the Tune screen: autotune and
+//! two-point servo calibration (tune.rs).
 //!
 //! Usage: spotmicro-deck [--host HOST[:PORT]] [--port N] [--user U --password P]
 //!                       [--prefix TOPIC_PREFIX] [--windowed] [--menu] [--controls]
@@ -19,6 +21,7 @@ mod protocol;
 mod shared;
 mod text;
 mod track;
+mod tune;
 mod ui;
 
 use std::fs::File;
@@ -39,6 +42,7 @@ use menu::Menu;
 use navview::{NavCam, NavCmd};
 use shared::{Shared, View};
 use track::TrackPick;
+use tune::{TuneCtx, TuneScreen};
 use ui::{Snapshot, Ui, LOGICAL_H, LOGICAL_W};
 
 #[derive(Default)]
@@ -54,11 +58,13 @@ struct Args {
     menu: bool,
     /// Start with the controls reference open.
     controls: bool,
+    /// Start with the Tune screen open on this page (home | auto | servo).
+    tune: Option<String>,
     /// Start on this view (color | depth | lidar | map).
     view: Option<View>,
     /// Save a screenshot of the current view after N seconds, then quit.
     screenshot: Option<(String, f32)>,
-    /// Scripted L2 presses with a screenshot of each view saved into this directory.
+    /// Scripted R2 presses with a screenshot of each view saved into this directory.
     selftest: Option<String>,
     quit_after: Option<f32>,
     /// Fake robot in auto nav mode (no connection): for screenshots of the nav view.
@@ -79,6 +85,7 @@ fn parse_args() -> Result<Args, String> {
             "--windowed" => a.windowed = true,
             "--menu" => a.menu = true,
             "--controls" => a.controls = true,
+            "--tune" => a.tune = Some(value("--tune")?),
             "--view" => {
                 let name = value("--view")?;
                 a.view = Some(View::ALL.into_iter().find(|v| v.wire_name() == name).ok_or("bad --view")?);
@@ -266,15 +273,30 @@ fn run() -> Result<(), String> {
     }
     let mut last_frame = Instant::now();
     let mut menu = Menu::default();
+    let mut tune_screen = TuneScreen::default();
+    if let Some(page) = &args.tune {
+        tune_screen.open = true;
+        tune_screen.page = match page.as_str() {
+            "auto" => tune::Page::Auto,
+            "servo" => tune::Page::Servo,
+            _ => tune::Page::Home,
+        };
+        tune_screen.home_sel = usize::from(page == "servo");
+        tune_screen.on_joint = page == "servo";
+        tune_screen.leg = 3;
+        tune_screen.joint = 2;
+    }
     menu.open = args.menu;
     menu.controls_open = args.controls && !args.menu;
     let mut last_note_seq: Option<u64> = None;
     let mut depth_ok = true;
-    // L2 / Tab: next view, skipping Depth when the robot's camera has none.
-    let next_view = |v: View, depth_ok: bool| {
-        let n = v.next();
+    // R2 / Tab: next view, L2 / Backspace: previous, skipping Depth when the
+    // robot's camera has none.
+    let step_view = |v: View, forward: bool, depth_ok: bool| {
+        let step = |v: View| if forward { v.next() } else { v.prev() };
+        let n = step(v);
         if n == View::Depth && !depth_ok {
-            n.next()
+            step(n)
         } else {
             n
         }
@@ -282,7 +304,7 @@ fn run() -> Result<(), String> {
     let started = Instant::now();
     let mut selftest_step = 0usize;
     let mut pending_release: Option<f32> = None;
-    // (seconds, take screenshot named X, then press L2) — see below
+    // (seconds, take screenshot named X, then press R2) — see below
     let selftest_dir = args.selftest.clone();
     if let Some(dir) = &selftest_dir {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -292,7 +314,7 @@ fn run() -> Result<(), String> {
         let elapsed = started.elapsed().as_secs_f32();
 
         // Inject scripted events for --selftest: hold each view for 6 s,
-        // screenshot it at the end, then pull and release L2.
+        // screenshot it at the end, then pull and release R2.
         let mut injected: Vec<Event> = Vec::new();
         if let Some(dir) = &selftest_dir {
             let phase_end = 8.0 + selftest_step as f32 * 6.0;
@@ -301,7 +323,7 @@ fn run() -> Result<(), String> {
                 save_screenshot(&canvas, &path)?;
                 println!("selftest: saved {path}");
                 if selftest_step < 4 {
-                    injected.push(axis_event(Axis::TriggerLeft, 32767)); // pull L2
+                    injected.push(axis_event(Axis::TriggerRight, 32767)); // pull R2
                     pending_release = Some(elapsed + 0.3);
                 }
                 selftest_step += 1;
@@ -311,7 +333,7 @@ fn run() -> Result<(), String> {
             }
             if let Some(t) = pending_release {
                 if elapsed >= t {
-                    injected.push(axis_event(Axis::TriggerLeft, 0)); // release L2
+                    injected.push(axis_event(Axis::TriggerRight, 0)); // release R2
                     injected.push(axis_event(Axis::LeftX, -20000)); // some stick movement
                     injected.push(axis_event(Axis::LeftY, -32767));
                     pending_release = None;
@@ -330,6 +352,7 @@ fn run() -> Result<(), String> {
                 // Keyboard equivalents, for testing on a PC.
                 Event::KeyDown { keycode: Some(k), .. } => match k {
                     Keycode::Tab | Keycode::Space => actions.push(Action::NextView),
+                    Keycode::Backspace => actions.push(Action::PrevView),
                     Keycode::M | Keycode::F1 => actions.push(Action::ToggleMenu),
                     Keycode::H | Keycode::F2 => actions.push(Action::ToggleControls),
                     Keycode::Up => actions.push(Action::Nav(Dir::Up)),
@@ -337,8 +360,9 @@ fn run() -> Result<(), String> {
                     Keycode::Left => actions.push(Action::Nav(Dir::Left)),
                     Keycode::Right => actions.push(Action::Nav(Dir::Right)),
                     Keycode::Return => actions.push(Action::Confirm),
-                    Keycode::B => actions.push(Action::Bluetooth),
-                    Keycode::P => actions.push(Action::Place),
+                    Keycode::P | Keycode::Y => actions.push(Action::Place),
+                    Keycode::T => actions.push(Action::ToggleTune),
+                    Keycode::X => actions.push(Action::X),
                     _ => {}
                 },
                 // Touchscreen taps arrive as (synthesised) left clicks, in logical pixels.
@@ -381,23 +405,32 @@ fn run() -> Result<(), String> {
         let now = Instant::now();
         let dt = now.duration_since(last_frame).as_secs_f32();
         last_frame = now;
-        let (settings, mode, robot_xy, track, frame_size) = {
+        let (settings, mode, robot_xy, track, frame_size, tune_ctx) = {
             let s = shared.lock().unwrap();
             let fresh = s.state_at.map(|t| t.elapsed().as_secs_f32() < 2.0).unwrap_or(false);
             let st = s.state.as_ref().filter(|_| fresh);
             let mode = st.and_then(|st| st.mode.as_ref()).map(|m| m.mode.clone()).unwrap_or_default();
+            let mode_info = st.and_then(|st| st.mode.as_ref());
+            let tune_ctx = TuneCtx {
+                mode: mode.clone(),
+                armed: st.and_then(|st| st.gait.as_ref()).is_some_and(|g| g.armed),
+                tune: mode_info.and_then(|m| m.tune.clone()),
+                servo: mode_info.and_then(|m| m.servo_cal.clone()),
+            };
             let track_fresh = s.track_at.map(|t| t.elapsed().as_secs_f32() < 1.5).unwrap_or(false);
             let track = s.track.clone().filter(|_| track_fresh);
             let frame_size = s.frame.as_ref().filter(|f| f.view == View::Color).map(|f| (f.width, f.height));
-            (s.settings.clone(), mode, st.and_then(|st| st.pose.as_ref()).map(|p| (p.x, p.y)), track, frame_size)
+            (menu::with_local_items(&s.settings), mode, st.and_then(|st| st.pose.as_ref()).map(|p| (p.x, p.y)), track, frame_size, tune_ctx)
         };
+        let mut tune_cmds: Vec<serde_json::Value> = Vec::new();
         let calibrating = mode == "calibrate";
         let auto_nav = mode == "auto_nav";
         let sentry = mode == "sentry";
         let tracking = track.as_ref().is_some_and(|t| t.active());
         // Sentry, on the camera view: touch / D-pad + A pick something to track.
         let video_rect = frame_size.map(|(w, h)| track::video_rect(w, h));
-        let picking = sentry && view == View::Color && !menu.open && !menu.controls_open && video_rect.is_some();
+        let picking = sentry && view == View::Color && !menu.open && !menu.controls_open && !tune_screen.open
+            && video_rect.is_some();
         let mut track_cmds: Vec<Option<[f32; 4]>> = Vec::new(); // Some = start on that box, None = stop
         if let (true, Some(r)) = (picking, video_rect) {
             for &(kind, x, y) in &touches {
@@ -415,7 +448,7 @@ fn run() -> Result<(), String> {
             pick.cancel_drag();
         }
         let mut nav_cmds: Vec<NavCmd> = Vec::new();
-        if auto_nav && !menu.open {
+        if auto_nav && !menu.open && !tune_screen.open {
             nav.update(dt, &pad.state, robot_xy);
             nav_cmds.extend(actions_tap.iter().filter_map(|&(x, y)| nav.tap(x, y)));
             nav_cmds.extend(nav.poll(now));
@@ -424,14 +457,32 @@ fn run() -> Result<(), String> {
         }
         for action in actions {
             let change = match action {
-                // L2 picks the joint in calibration mode and zooms the auto-nav map,
-                // so it doesn't switch views then.
-                Action::NextView if calibrating || auto_nav => None,
+                Action::ToggleTune => {
+                    tune_cmds.extend(tune_screen.toggle(&tune_ctx));
+                    menu.open = false;
+                    menu.controls_open = false;
+                    None
+                }
+                // The Tune screen takes the D-pad and face buttons while it is up.
+                Action::Nav(_) | Action::Confirm | Action::X | Action::Place if tune_screen.open => {
+                    tune_cmds.extend(tune_screen.handle(action, &tune_ctx));
+                    None
+                }
+                Action::NextView | Action::PrevView | Action::ToggleMenu | Action::ToggleControls if tune_screen.open => None,
+                // Fallback for a Deck whose back grips don't reach the app: A on the controls screen.
+                Action::Confirm if menu.controls_open => {
+                    menu.controls_open = false;
+                    tune_cmds.extend(tune_screen.toggle(&tune_ctx));
+                    None
+                }
+                // L2/R2 pick the joint in calibration mode and zoom the auto-nav map,
+                // so they don't switch views then.
+                Action::NextView | Action::PrevView if calibrating || auto_nav => None,
                 Action::Confirm if auto_nav && !menu.open => {
                     nav.press_a(now);
                     None
                 }
-                Action::Bluetooth if auto_nav && !menu.open => {
+                Action::X if auto_nav && !menu.open => {
                     nav_cmds.extend(nav.press_x());
                     None
                 }
@@ -452,14 +503,14 @@ fn run() -> Result<(), String> {
                     track_cmds.push(Some(pick.reticle(r.width() as f32 / r.height() as f32)));
                     None
                 }
-                Action::Bluetooth if sentry && tracking && !menu.open => {
+                Action::X if sentry && tracking && !menu.open => {
                     track_cmds.push(None);
                     None
                 }
-                Action::NextView => {
-                    view = next_view(view, depth_ok);
+                Action::NextView | Action::PrevView => {
+                    view = step_view(view, action == Action::NextView, depth_ok);
                     if selftest_dir.is_some() {
-                        println!("selftest: L2 -> view {}", view.wire_name());
+                        println!("selftest: R2 -> view {}", view.wire_name());
                     }
                     None
                 }
@@ -473,15 +524,13 @@ fn run() -> Result<(), String> {
                 }
                 Action::Nav(d) if menu.open => menu.navigate(d, &settings),
                 Action::Confirm if menu.open => menu.confirm(&settings),
-                // Only offered while there's no link: on the same network, nothing to set up.
-                Action::Bluetooth if !shared.lock().unwrap().broker_connected => {
-                    bt::start(&provision);
-                    None
-                }
                 _ => None,
             };
             if let Some((key, value)) = change {
-                if !commander.set(&key, &value) {
+                if key == menu::BT_WIFI_KEY {
+                    bt::start(&provision);
+                    menu.open = false;
+                } else if !commander.set(&key, &value) {
                     menu.notify("Not connected — change not sent".into(), false);
                 }
             }
@@ -510,6 +559,11 @@ fn run() -> Result<(), String> {
                 menu.notify("Not connected — not sent".into(), false);
             }
         }
+        for cmd in tune_cmds {
+            if !commander.tune(&cmd) {
+                menu.notify("Not connected — not sent".into(), false);
+            }
+        }
         for cmd in track_cmds {
             let (sent, what) = match cmd {
                 Some(b) => (commander.track_start(b), "Tracking — X to stop"),
@@ -535,9 +589,10 @@ fn run() -> Result<(), String> {
         }
         let acks = std::mem::take(&mut shared.lock().unwrap().acks);
         for ack in &acks {
-            if ack.key == "set_pose" {
-                // Not a setting: the result of placing the robot on the map.
-                menu.notify(if ack.text.is_empty() { "Robot placed".into() } else { ack.text.clone() }, ack.ok);
+            if ack.key == "set_pose" || ack.key == "autotune_keep" {
+                // Not settings: the result of placing the robot on the map / saving autotune's changes.
+                let done = if ack.key == "set_pose" { "Robot placed" } else { "Saved" };
+                menu.notify(if ack.text.is_empty() { done.into() } else { ack.text.clone() }, ack.ok);
             } else {
                 menu.on_ack(ack, &settings);
             }
@@ -551,6 +606,20 @@ fn run() -> Result<(), String> {
             for b in [protocol::BTN_A, protocol::BTN_DPAD_UP, protocol::BTN_DPAD_DOWN, protocol::BTN_DPAD_LEFT, protocol::BTN_DPAD_RIGHT] {
                 sent.buttons[b] = false;
             }
+        }
+        if tune_screen.open {
+            // Only safety and stack buttons reach the robot: B (estop), L3+R3 (arm),
+            // L1/R1 (stack chord, body height). The sticks only during an autotune
+            // run, so touching one stops it; otherwise the robot can't walk off
+            // while the camera isn't on screen.
+            let mut only = input::InputState::default();
+            for b in [protocol::BTN_B, protocol::BTN_L3, protocol::BTN_R3, protocol::BTN_L1, protocol::BTN_R1] {
+                only.buttons[b] = sent.buttons[b];
+            }
+            if tune_ctx.running() {
+                only.axes[..4].copy_from_slice(&sent.axes[..4]);
+            }
+            sent = only;
         }
         *input_shared.lock().unwrap() = sent;
 
@@ -595,12 +664,17 @@ fn run() -> Result<(), String> {
                 gamepad_connected: !controllers.is_empty(),
                 settings,
                 settings_age: age(s.settings_at),
+                tune: tune_screen.open.then(|| (tune_screen.clone(), tune_ctx.clone())),
                 provision: provision.lock().unwrap().clone(),
             }
         };
-        // Bluetooth setup found the robot's address: save it and restart on it.
+        // Bluetooth setup found the robot's address: save it and restart on it —
+        // unless we're connected and the robot didn't change networks (nothing to do).
         if let Some(ip) = snap.provision.host.clone().filter(|_| !snap.provision.running) {
-            if format!("{ip}:{port}") != host_label {
+            if snap.broker_connected && !snap.provision.moved {
+                provision.lock().unwrap().host = None;
+                menu.notify(format!("Robot is on the Deck's Wi-Fi ({ip}) — already connected"), true);
+            } else if format!("{ip}:{port}") != host_label {
                 ui.render(&mut canvas, &tc, &snap, &menu);
                 canvas.present();
                 restart_with_host(&ip)?;

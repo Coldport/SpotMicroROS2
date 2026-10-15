@@ -76,6 +76,13 @@ impl Commander {
             .is_ok()
     }
 
+    /// Tune screen: an autotune / servo calibration command (protocol.py decode_tune).
+    pub fn tune(&self, cmd: &serde_json::Value) -> bool {
+        self.client
+            .try_publish(&self.topics.deck_tune, QoS::AtLeastOnce, false, cmd.to_string())
+            .is_ok()
+    }
+
     /// Sentry: stop tracking.
     pub fn track_stop(&self) -> bool {
         self.client

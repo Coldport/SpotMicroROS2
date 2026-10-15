@@ -11,7 +11,8 @@ Starts:
                            USB webcam, color only (/spotmicro_cam/usb/...)
   static odom -> base_link — identity, stands in for real odometry
   scan_gate              — /scan -> /scan_gated, drops scans taken while a foot is up
-                           (passes everything when gait_node isn't running)
+                           (passes everything when gait_node isn't running); also stops
+                           the lidar while gait_node is in sentry mode
   slam_toolbox           — 2D lidar SLAM on /scan_gated, publishes /map and map -> odom
   deck_bridge            — MQTT bridge to the Steam Deck app (streams + /spotmicro_deck/joy)
 
@@ -119,13 +120,14 @@ def generate_launch_description():
         _include('spot_micro_deck', 'deck.launch.py',
                  condition=IfCondition(LaunchConfiguration('deck'))),
 
-        # Pure relay, no hardware: keeps SLAM fed even with no gait_node running.
+        # Relay that keeps SLAM fed even with no gait_node running. Runs with the
+        # lidar (not just SLAM) because it also stops the lidar in sentry mode.
         Node(
             package='spot_micro_move',
             executable='scan_gate',
             name='scan_gate',
             output='screen',
-            condition=IfCondition(LaunchConfiguration('slam'))),
+            condition=IfCondition(LaunchConfiguration('lidar'))),
 
         # slam_toolbox's own launch file defaults use_sim_time to TRUE, which on
         # real hardware makes it wait forever for a simulated /clock.

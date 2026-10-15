@@ -14,6 +14,11 @@
       color_topic: "/spotmicro_cam/d405/color/image_raw/compressed"
       usb_color_topic: "/spotmicro_cam/usb/image_raw/compressed"
       depth_topic: "/spotmicro_cam/d405/depth/image_rect_raw"
+      # Stop the camera while the Deck shows the map view (unless track_node or
+      # another viewer still subscribes to it); it starts again on leaving the view.
+      camera_off_in_map: true
+      usb_capture_service: "/spotmicro_cam/set_capture"
+      realsense_node: "/spotmicro_cam/d405"
       scan_topic: "/scan"
       map_topic: "/map"
       imu_topic: "/spotmicro_imu/imu/data"
@@ -25,7 +30,7 @@
       armed_topic: "/spotmicro_move/armed"
 
       jpeg_quality: 75
-      video_max_fps: 30.0
+      video_max_fps: 20.0
       scan_rate_hz: 10.0
       state_rate_hz: 5.0
       # Depth view colour range: near = warm, far = cool, no reading = black.

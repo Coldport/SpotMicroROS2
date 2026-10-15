@@ -12,8 +12,11 @@ pub const BUTTON_NAMES: [&str; 21] = [
     "dpad_left", "dpad_right", "paddle1", "paddle2", "paddle3", "paddle4", "l2", "r2",
 ];
 pub const BTN_A: usize = 0;
+pub const BTN_B: usize = 1;
 pub const BTN_L1: usize = 4;
 pub const BTN_R1: usize = 5;
+pub const BTN_L3: usize = 9;
+pub const BTN_R3: usize = 10;
 pub const BTN_DPAD_UP: usize = 11;
 pub const BTN_DPAD_DOWN: usize = 12;
 pub const BTN_DPAD_LEFT: usize = 13;
@@ -38,6 +41,7 @@ pub struct Topics {
     pub deck_set: String,
     pub deck_nav: String,
     pub deck_track: String,
+    pub deck_tune: String,
     pub track: String,
 }
 
@@ -62,6 +66,7 @@ impl Topics {
             deck_set: t("deck/set"),
             deck_nav: t("deck/nav"),
             deck_track: t("deck/track"),
+            deck_tune: t("deck/tune"),
             track: t("track"),
         }
     }

@@ -35,6 +35,8 @@ pub struct Provision {
     pub error: Option<String>,
     /// Robot IP once done; main.rs reconnects to it.
     pub host: Option<String>,
+    /// The robot was sent the Deck's Wi-Fi (false: it was already on it).
+    pub moved: bool,
 }
 
 pub type ProvisionRef = Arc<Mutex<Provision>>;
@@ -125,6 +127,7 @@ fn run(p: &ProvisionRef) -> Result<String, String> {
         }
     }
     let (ssid, psk) = deck_wifi()?;
+    p.lock().unwrap().moved = true;
     step(p, format!("Sending Wi-Fi “{ssid}” to the robot…"));
     let msg = serde_json::json!({"cmd": "wifi", "ssid": ssid, "psk": psk});
     writer.write_all(format!("{msg}\n").as_bytes()).map_err(|e| format!("send failed: {e}"))?;
