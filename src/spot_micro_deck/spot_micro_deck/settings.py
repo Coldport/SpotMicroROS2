@@ -47,8 +47,9 @@ def _f(key, label, group, lo, hi, step, unit='', help='', target='gait'):  # pyl
 
 SETTINGS = [
     # ── Walk ──
-    Setting('gait_type', 'Gait', 'Walk', 'enum', options=['crawl', 'trot'],
-            help='crawl: one leg up at a time. trot: diagonal pairs. Stop walking to switch.'),
+    Setting('gait_type', 'Gait', 'Walk', 'enum', options=['crawl', 'crawl8', 'trot'],
+            help='crawl: one leg up at a time. crawl8: mike4192 8-phase crawl. trot: diagonal pairs. '
+                 'Stop walking to switch.'),
     _f('speed_scale', 'Speed', 'Walk', 0.1, 1.5, 0.05, 'x', 'Multiplies the sticks before they become stride.'),
     _f('gait_freq', 'Step rate', 'Walk', 0.1, 2.0, 0.05, 'Hz', 'Full step cycles per second.'),
     _f('step_length', 'Stride length', 'Walk', 0.0, 70.0, 5.0, 'mm', 'Fore/aft stride at full stick.'),
@@ -72,6 +73,15 @@ SETTINGS = [
     _f('balance_max_shift', 'Max sway', 'Balance', 0.0, 60.0, 5.0, 'mm'),
     _f('shift_frac', 'Four-feet-down time', 'Balance', 0.0, 0.9, 0.05, '', 'Share of each leg slot spent shifting.'),
     _f('shift_overlap', 'Sway overlap', 'Balance', 0.0, 0.5, 0.05, '', 'How far the slide spills into the swing.'),
+    _f('crawl8_shift_fwd', 'crawl8 sway forward', 'Balance', 0.0, 50.0, 5.0, 'mm',
+       'Body forward while a rear leg swings.'),
+    _f('crawl8_shift_back', 'crawl8 sway back', 'Balance', 0.0, 50.0, 5.0, 'mm', 'Body back while a front leg swings.'),
+    _f('crawl8_shift_side', 'crawl8 sway sideways', 'Balance', 0.0, 40.0, 5.0, 'mm', 'Body away from the lifted leg.'),
+    Setting('sway_profile', 'Sway shape', 'Balance', 'enum', options=['step', 'sine'],
+            help='step: slide, then hold. sine: one smooth curve through the same targets '
+                 '(steadier camera). Stop walking to switch.'),
+    _f('sway_fwd_vel_frac', 'Sine sway front/back', 'Balance', 0.0, 2.0, 0.1, 'x',
+       'Peak front/back sway speed per walking speed. Under 1 = body never moves backward.'),
     # ── Leveling ──
     Setting('level_enabled', 'IMU leveling', 'Leveling', 'bool',
             help='Use the IMU to keep the body level.'),
@@ -91,6 +101,15 @@ SETTINGS = [
        'Steps slow down when the body tilts more than this.'),
     _f('walk_heading_gain', 'Heading hold', 'Leveling', 0.0, 3.0, 0.1, 'x',
        'Steer back to the IMU heading when walking with the turn stick centred. 0 = off.'),
+    # ── Tuning (autotune on the Deck's Tune screen sets these) ──
+    _f('odom_scale', 'Odometry scale', 'Tuning', 0.3, 2.5, 0.01, 'x',
+       'Real distance walked / what the gait thinks. Autotune measures it with the lidar.'),
+    _f('turn_scale', 'Turn rate scale', 'Tuning', 0.2, 3.0, 0.01, 'x',
+       'Real turn rate / what the leg geometry predicts (auto nav\'s turns).'),
+    _f('walk_turn_trim', 'Walk straight trim', 'Tuning', -0.4, 0.4, 0.005, '',
+       'Turn added while walking, to cancel a veer. + = more to the left (with turn sign +1).'),
+    _f('cmd_vel_turn_sign', 'Turn sign', 'Tuning', -1.0, 1.0, 2.0, '',
+       '+1 if a left turn on the stick turns the robot left (auto nav and heading hold rely on it).'),
     # ── Sentry (double-tap Y) ──
     _f('sentry_max_roll_deg', 'Max roll', 'Sentry', 0.0, 30.0, 1.0, 'deg', 'Left stick X at full tilt.'),
     _f('sentry_max_pitch_deg', 'Max pitch', 'Sentry', 0.0, 30.0, 1.0, 'deg', 'Left stick Y at full tilt.'),

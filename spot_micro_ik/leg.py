@@ -13,6 +13,9 @@ as-is rather than "fixed".
 
 Right legs (FR, RR) mirror the IK output: servo_angle = 180 - angle.
 
+Calibration: servo = 90 + scale * (angle - 90) + offset (JointCal.command;
+scale is 1 unless a two-point calibration set it).
+
 One behavior change from test_IK.py: test_IK.py never applied the calibration
 "offset" at all. This module does (offset is added before clamping, same as
 Servo_calib.py's manual jogging tool) — so re-check the standing pose before
@@ -62,7 +65,7 @@ class Leg:
         for joint, angle_deg in angles.items():
             if angle_deg is not None:
                 joint_cal = getattr(self.cal, joint)
-                out[joint_cal.channel] = _clamp(angle_deg + joint_cal.offset, 0.0, joint_cal.range)
+                out[joint_cal.channel] = _clamp(joint_cal.command(angle_deg), 0.0, joint_cal.range)
         return out
 
     def joint_angles(self, x, y, z, roll=0.0, pitch=0.0, yaw=0.0):
@@ -82,6 +85,6 @@ class Leg:
 
     def servo_command(self, joint, angle_deg):
         """Servo angle (deg, pre-offset) for one joint -> the value actually
-        written to its channel (offset added, clamped to the servo's range)."""
+        written to its channel (scale and offset applied, clamped to the servo's range)."""
         joint_cal = getattr(self.cal, joint)
-        return _clamp(angle_deg + joint_cal.offset, 0.0, joint_cal.range)
+        return _clamp(joint_cal.command(angle_deg), 0.0, joint_cal.range)

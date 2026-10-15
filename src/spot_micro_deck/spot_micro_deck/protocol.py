@@ -62,6 +62,18 @@ Deck -> Robot
   <p>/deck/track     JSON, sentry object tracking (normalised image box, see <p>/track):
                        {"cmd": "start", "box": [0.4, 0.3, 0.2, 0.25]}
                        {"cmd": "stop"}
+  <p>/deck/tune      JSON, the Deck's Tune screen (gait_node modes autotune / servo_cal):
+                       {"cmd": "autotune_start"}  | "autotune_stop" | "autotune_revert"
+                       {"cmd": "autotune_keep"}   the bridge saves the run's changes into the
+                                                  params file; result on <p>/settings/ack, key
+                                                  "autotune_keep"
+                       {"cmd": "autotune_clear"}  forget the last run's report
+                       {"cmd": "servo_start"} | "servo_stop" (saves) | "servo_apply" | "servo_clear"
+                       {"cmd": "servo_select", "leg": "FL", "joint": "hip"}
+                       {"cmd": "servo_jog", "delta": 1.0}       (deg, the joint's real angle)
+                       {"cmd": "servo_record", "actual": 93.5}  (deg the joint really sits at)
+                     Progress comes back in <p>/state "mode": "tune" (autotune report) and
+                     "servo_cal" (see gait_node _servo_cal_status).
 
 All binary fields are little endian.
 """
@@ -72,7 +84,7 @@ import struct
 
 DEFAULT_PREFIX = 'spotmicro'
 
-# Main-display views, in the order the Deck's L2 button cycles through them.
+# Main-display views, in the order the Deck's R2 button cycles through them (L2 goes back).
 # Only the first two are camera streams; the robot sends video for those alone.
 VIEW_NAMES = ['color', 'depth', 'lidar', 'map']
 VIDEO_VIEWS = ('color', 'depth')
@@ -125,6 +137,7 @@ def topics(prefix=DEFAULT_PREFIX):
         'deck_set': f'{p}/deck/set',
         'deck_nav': f'{p}/deck/nav',
         'deck_track': f'{p}/deck/track',
+        'deck_tune': f'{p}/deck/tune',
         'track': f'{p}/track',
     }
 
@@ -227,6 +240,40 @@ def decode_track(payload):
     except (ValueError, KeyError, TypeError) as exc:
         raise ProtocolError(f'bad track message: {exc}') from exc
     raise ProtocolError(f'unknown track command "{cmd}"')
+
+
+TUNE_COMMANDS = ('autotune_start', 'autotune_stop', 'autotune_keep', 'autotune_revert', 'autotune_clear',
+                 'servo_start', 'servo_stop', 'servo_select', 'servo_jog', 'servo_record', 'servo_apply',
+                 'servo_clear')
+TUNE_LEGS = ('FL', 'FR', 'RL', 'RR')
+TUNE_JOINTS = ('hip', 'thigh', 'knee')
+
+
+def decode_tune(payload):
+    """-> a validated deck/tune command dict (only the fields that command takes)."""
+    try:
+        msg = json.loads(payload)
+        cmd = msg['cmd']
+        if cmd not in TUNE_COMMANDS:
+            raise ProtocolError(f'unknown tune command "{cmd}"')
+        out = {'cmd': cmd}
+        if cmd == 'servo_select':
+            if msg['leg'] not in TUNE_LEGS or msg['joint'] not in TUNE_JOINTS:
+                raise ValueError(f'unknown joint {msg["leg"]} {msg["joint"]}')
+            out.update(leg=msg['leg'], joint=msg['joint'])
+        elif cmd in ('servo_jog', 'servo_record'):
+            field = 'delta' if cmd == 'servo_jog' else 'actual'
+            v = msg[field]
+            if isinstance(v, bool):
+                raise ValueError(f'{field} must be a number')
+            v = float(v)
+            limit = 30.0 if cmd == 'servo_jog' else 360.0
+            if not math.isfinite(v) or abs(v) > limit:
+                raise ValueError(f'{field} out of range')
+            out[field] = v
+        return out
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ProtocolError(f'bad tune message: {exc}') from exc
 
 
 def decode_input(payload):

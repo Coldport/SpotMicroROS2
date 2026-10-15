@@ -14,6 +14,10 @@
 # offset:  degrees added to the commanded angle before it's sent to the servo,
 #          to correct for horn/linkage mounting error. Positive = commanded
 #          angle is nudged up before clamping to [0, range].
+# scale:   optional (default 1), set by the Deck's two-point servo calibration:
+#          servo = 90 + scale * (angle - 90) + offset, so offset is the
+#          correction at 90 deg and scale corrects a servo that turns too far
+#          or not far enough.
 #
 # Values below were copied from servo_calibration.txt on 2026-09-24; Back Right Hip
 # offset re-synced on 2026-10-06. Verified against IK: with these offsets, IK foot
@@ -35,7 +39,7 @@ Front Right:
     channel: 10
     angle: 120
     range: 270
-    offset: 6
+    offset: 5.75
 
 Front Left:
   Hip:
@@ -47,12 +51,13 @@ Front Left:
     channel: 14
     angle: 60
     range: 270
-    offset: 30
+    offset: 10
   Knee:
     channel: 13
     angle: 60
     range: 270
-    offset: 10
+    offset: 1.4
+    scale: 1.1465
 
 Back Right:
   Hip:
@@ -64,12 +69,12 @@ Back Right:
     channel: 4
     angle: 120
     range: 270
-    offset: 2.5
+    offset: 9
   Knee:
     channel: 5
     angle: 120
     range: 270
-    offset: 5
+    offset: -5
 
 Back Left:
   Hip:

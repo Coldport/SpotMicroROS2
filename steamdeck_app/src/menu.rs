@@ -49,6 +49,35 @@ pub struct Menu {
 /// A value change to send to the robot.
 pub type Change = (String, Value);
 
+/// Rows the app adds itself (not from the robot) start with this; main.rs
+/// handles their Change instead of sending it.
+pub const LOCAL_PREFIX: &str = "deck.";
+/// "Wi-Fi setup over Bluetooth": an A×2 action row, so it can't start by accident.
+pub const BT_WIFI_KEY: &str = "deck.bt_wifi";
+
+/// The robot's settings plus the app's own Connection rows, which are there
+/// even with no link (that's when they're needed most).
+pub fn with_local_items(robot: &[SettingItem]) -> Vec<SettingItem> {
+    let mut items = robot.to_vec();
+    items.push(SettingItem {
+        key: BT_WIFI_KEY.into(),
+        label: "Wi-Fi setup over Bluetooth".into(),
+        group: "Connection".into(),
+        kind: "action".into(),
+        help: "Finds the robot over Bluetooth and puts it on the Deck's Wi-Fi (or just learns its \
+               address). Works whether or not the app is connected."
+            .into(),
+        available: true,
+        ..Default::default()
+    });
+    items
+}
+
+/// True if the robot itself hasn't sent any settings (only the app's rows are there).
+pub fn robot_items_missing(items: &[SettingItem]) -> bool {
+    items.iter().all(|i| i.key.starts_with(LOCAL_PREFIX))
+}
+
 fn decimals(step: f64) -> usize {
     if step >= 1.0 {
         0
@@ -300,6 +329,19 @@ mod tests {
         assert_eq!(m.selected, 9);
         m.navigate(Dir::Down, &items);
         assert_eq!(m.selected, 0);
+    }
+
+    #[test]
+    fn bt_wifi_row_is_always_there_and_needs_two_presses() {
+        let items = with_local_items(&[]);
+        assert!(robot_items_missing(&items));
+        assert_eq!(items.len(), 1);
+        let mut m = Menu::default();
+        assert_eq!(m.confirm(&items), None, "first A only arms it");
+        assert_eq!(m.confirm(&items), Some((BT_WIFI_KEY.to_string(), Value::Bool(true))));
+        let with_robot = with_local_items(&[num("h", 40.0, 10.0, 90.0, 5.0)]);
+        assert!(!robot_items_missing(&with_robot));
+        assert_eq!(with_robot.last().unwrap().key, BT_WIFI_KEY, "robot rows come first");
     }
 
     #[test]

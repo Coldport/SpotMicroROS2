@@ -6,6 +6,8 @@ crawl gait, and can plan and walk a path to a goal you pick on the Deck's map.
 
 📖 **Full documentation is in the [wiki](https://github.com/Coldport/SpotMicroROS2/wiki).**
 
+![What's on the robot](docs/images/robot_side.png)
+
 ![System architecture](docs/images/architecture.png)
 
 ## Hardware
@@ -30,7 +32,7 @@ source install/setup.bash
 ros2 launch spot_micro_bringup robot.launch.py        # sensing + SLAM only, never moves
 ```
 
-From the Steam Deck ([install the app](https://github.com/Coldport/SpotMicroROS2/wiki/Steam-Deck-App#installing-the-app-on-the-deck)):
+From the Steam Deck ([install the app](https://github.com/Coldport/SpotMicroROS2/wiki/Installing-the-Deck-App)):
 
 1. The robot starts the Deck bridge on boot. Open the app and it connects.
 2. Hold **L1 + R1** for 3 s to start the stack (sensors, SLAM, and the gait node, disarmed).

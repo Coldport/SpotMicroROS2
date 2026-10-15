@@ -37,7 +37,14 @@ a servo until L3+R3 is held too.
 GAIT: `gait_type` "crawl" (default) lifts one leg at a time in the order
 RL -> FL -> RR -> FR, so three feet are always on the ground; each leg gets
 1/4 of the cycle (body shift, then swing — see BALANCE SHIFT). "trot" is the old diagonal-pair gait (FL+RR, FR+RL),
-swinging for 1/2 of the cycle.
+swinging for 1/2 of the cycle. "crawl8" is mike4192's 8-phase crawl
+(RR -> FR -> RL -> FL): the cycle is 8 equal phases, alternating four feet
+down while the body shifts and one leg swinging while the body holds still
+(shift_frac 0.5, shift_overlap 0, whatever those params say). Its body shift
+is a fixed amount in mm, not the support-triangle centroid: `crawl8_shift_fwd`
+forward when a rear leg lifts, `crawl8_shift_back` back when a front leg
+lifts, and `crawl8_shift_side` away from the lifted leg. mike4192 runs it at
+0.36 s per phase, i.e. gait_freq ~0.35.
 
 STANCE: feet sit a little outside the hips (`stance_y`), front feet a little
 ahead of the front hips (`stance_x_front`) and rear feet a little behind the
@@ -63,8 +70,16 @@ no jerk at its start or end.
 Target = gain * (centroid of the other three feet), using `level_half_length`
 / `level_half_width` as the foot rectangle; `balance_gain_lateral` and
 `balance_gain_fore_aft` scale it, `balance_max_shift` clamps it (mm). Fore/aft
-uses `ik_x_forward_sign` to map body-forward onto IK x. Crawl only (trot has
+uses `ik_x_forward_sign` to map body-forward onto IK x. Crawl/crawl8 only (trot has
 two feet down on a diagonal, which a body shift can't help).
+`sway_profile` "step" is the above. "sine" keeps the camera steadier: the same
+per-slot targets (held mid-swing) become one continuous curve, the mean plus
+the first two harmonics of the gait cycle, which passes through every target
+at the middle of its swing. Side to side that is one gentle sine per cycle
+instead of two quick slides. Front/back the oscillating part is scaled so the
+body's forward speed only rises and falls but never reverses
+(`sway_fwd_vel_frac` = its peak speed as a share of the walking speed), so
+standing-still turns and strafes get only the constant mean offset.
 
 TURNING: the turn stick rotates the body about its centre, so each foot's
 stride follows an arc of the circle through it (front and rear feet also
@@ -187,8 +202,30 @@ one is active — deck_bridge forwards it to the Deck):
              level and from every pose already done, and held still. The
              spot_micro_imu node does the maths and saves the result to
              imu_params.yaml (see spot_micro_imu/mount.py).
+  autotune   from the Deck's Tune screen (not a button): the robot walks a
+             test course by itself — 1 m forward and back, two steps left
+             and right, a half turn each way — and sets odom_scale, the
+             balance sway, cmd_vel_turn_sign, turn_scale and walk_turn_trim
+             from what the IMU and lidar saw (spot_micro_move/autotune.py; the
+             `tune_*` params size the course). Heading hold is off while it
+             runs. A stick, B or an obstacle stops it. Changes are live at
+             once; the Deck then keeps them (deck_bridge saves them into
+             move_params.yaml) or reverts them.
+  servo_cal  also from the Tune screen: two-point servo calibration. Feet go to
+             calib_pose as in calibrate; the Deck picks a joint, jogs it to an
+             angle, and says what angle the joint REALLY sits at (measured);
+             two such points fit that servo's offset and scale (servo =
+             90 + scale * (angle - 90) + offset, spot_micro_ik.calibration
+             fit_joint). Leaving it saves to `calibration_path`.
+             Commands arrive as JSON on `tune_cmd_topic` (deck_bridge relays
+             the Deck's <p>/deck/tune; see spot_micro_deck/protocol.py).
 Leaving sentry, calibrate or a trick glides the feet back to the stand pose
 before the sticks can walk again.
+
+TURN TRIM: `walk_turn_trim` (turn stick per unit of forward stick) is added
+while walking, after heading hold, to cancel a steady veer; `turn_scale`
+(real / modelled turn rate) corrects how auto nav's cmd_vel turn becomes a
+turn stick. Autotune sets both.
 
 IMU ZERO: hold `imu_zero_buttons` (default y + dpad_down) for
 `imu_chord_hold_s` (armed or not): the robot's current attitude becomes level
@@ -200,28 +237,33 @@ NOTES: the mode message also carries the last result to show on the Deck
 ("note": {"seq", "text", "ok"}), e.g. "IMU zeroed".
 """
 
+import cmath
 import json
 import math
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
+from rclpy.time import Time
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.qos import (DurabilityPolicy, QoSProfile, ReliabilityPolicy,
                        qos_profile_sensor_data)
 from geometry_msgs.msg import TransformStamped, Twist
-from sensor_msgs.msg import Imu, Joy
+from sensor_msgs.msg import Imu, Joy, LaserScan
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
-from tf2_ros import TransformBroadcaster
+from tf2_ros import Buffer, TransformBroadcaster, TransformException, TransformListener
 
 from spot_micro_deck.chord import ChordDetector, DoubleTap, Repeat, TapCounter
 from spot_micro_deck.protocol import AXIS_NAMES, BUTTON_NAMES
 from spot_micro_ik import Dog, load_calibration
-from spot_micro_ik.calibration import JOINTS, save_offsets, with_offset
+from spot_micro_ik.calibration import JOINTS, fit_joint, save_offsets, with_cal, with_offset
 from spot_micro_ik.dog import DEFAULT_STAND_POSE
-from spot_micro_move import tricks
+from spot_micro_ik.leg import RIGHT_LEGS
+from spot_micro_move import autotune, scan_match, tricks
 
 _AX = {name: i for i, name in enumerate(AXIS_NAMES)}
 _BTN = {name: i for i, name in enumerate(BUTTON_NAMES)}
@@ -234,11 +276,16 @@ _BTN = {name: i for i, name in enumerate(BUTTON_NAMES)}
 GAITS = {
     'crawl': ({'RL': 0.0, 'FL': 0.25, 'RR': 0.5, 'FR': 0.75}, 0.25),
     'trot': ({'FL': 0.0, 'RR': 0.0, 'FR': 0.5, 'RL': 0.5}, 0.5),
+    # crawl8: mike4192's order; shift_frac forced to 0.5 -> 8 equal phases.
+    'crawl8': ({'RR': 0.0, 'FR': 0.25, 'RL': 0.5, 'FL': 0.75}, 0.25),
 }
+CRAWLS = ('crawl', 'crawl8')   # gaits with a four-feet-down body shift
 LEFT_SIDE = {"FL", "RL"}   # sign convention for the turn approximation below
 FRONT = {"FL", "FR"}
 LEGS = ('FL', 'FR', 'RL', 'RR')
-MODES = ('walk', 'sentry', 'calibrate', 'trick', 'imu_calib', 'auto_nav')
+MODES = ('walk', 'sentry', 'calibrate', 'trick', 'imu_calib', 'auto_nav', 'autotune', 'servo_cal')
+# Modes started and driven from the Deck's Tune screen (`tune_cmd_topic`), not by buttons.
+TUNE_MODES = ('autotune', 'servo_cal')
 DPAD = ('dpad_up', 'dpad_down', 'dpad_left', 'dpad_right')
 # IMU axis calibration steps, in order; 'return' only when armed.
 IMU_CAL_STEPS = ('level', 'left', 'right', 'front', 'back', 'return')
@@ -253,6 +300,8 @@ LIVE_PARAMS = frozenset([
     'stand_z', 'step_height', 'step_length', 'step_lateral', 'turn_gain', 'max_foot_offset',
     'gait_freq', 'gait_type', 'shift_frac', 'shift_overlap',
     'balance_enabled', 'balance_gain_lateral', 'balance_gain_fore_aft', 'balance_max_shift',
+    'crawl8_shift_fwd', 'crawl8_shift_back', 'crawl8_shift_side',
+    'sway_profile', 'sway_fwd_vel_frac',
     'ik_x_forward_sign', 'stance_x_front', 'stance_x_rear', 'stance_y', 'settle_speed',
     *(f'trim_{leg.lower()}' for leg in ('FL', 'FR', 'RL', 'RR')),
     'level_enabled', 'imu_timeout_s', 'imu_roll_sign', 'imu_pitch_sign', 'imu_swap_roll_pitch',
@@ -265,6 +314,8 @@ LIVE_PARAMS = frozenset([
     'walk_stab_enabled', 'walk_level_kp', 'walk_level_kd', 'walk_level_filter_s',
     'walk_com_gain', 'walk_com_max', 'walk_tilt_slow_deg', 'walk_tilt_stop_deg', 'walk_min_speed',
     'walk_heading_gain', 'walk_heading_max',
+    'odom_scale', 'cmd_vel_turn_sign', 'turn_scale', 'walk_turn_trim',
+    'tune_distance_m', 'tune_strafe_cycles', 'tune_turn_deg', 'tune_stick', 'tune_min_clearance_m',
 ])
 
 
@@ -327,15 +378,22 @@ class GaitNode(Node):
         self.declare_parameter('max_foot_offset', 60.0)   # mm clamp on each foot's horizontal stride offset
         self.declare_parameter('stable_topic', '/spotmicro_move/stable')
         self.declare_parameter('odom_scale', 1.0)         # measured / estimated distance walked
+        self.declare_parameter('turn_scale', 1.0)         # measured / modelled turn rate (auto nav's cmd_vel)
+        self.declare_parameter('walk_turn_trim', 0.0)     # turn stick added per unit of forward stick (anti-veer)
         self.declare_parameter('armed_topic', '/spotmicro_move/armed')
         self.declare_parameter('gait_freq', 1.0)          # full step cycles per second at any commanded speed
-        self.declare_parameter('gait_type', 'crawl')      # 'crawl' (one leg at a time) or 'trot'
+        self.declare_parameter('gait_type', 'crawl')      # 'crawl' / 'crawl8' (one leg at a time) or 'trot'
         self.declare_parameter('shift_frac', 0.35)        # fraction of each leg's slot with 4 feet down, shifting body
         self.declare_parameter('shift_overlap', 0.4)      # fraction of a swing the body slide may spill into
         self.declare_parameter('balance_enabled', True)
         self.declare_parameter('balance_gain_lateral', 1.0)   # x centroid of the 3 support feet, side to side
         self.declare_parameter('balance_gain_fore_aft', 0.0)  # x centroid, front/back (needs ik_x_forward_sign right)
         self.declare_parameter('balance_max_shift', 40.0)     # mm clamp per axis
+        self.declare_parameter('crawl8_shift_fwd', 35.0)      # mm body forward while a rear leg swings
+        self.declare_parameter('crawl8_shift_back', 5.0)      # mm body back while a front leg swings
+        self.declare_parameter('crawl8_shift_side', 15.0)     # mm body away from the swinging leg
+        self.declare_parameter('sway_profile', 'step')        # 'step' (slide, hold) or 'sine' (see BALANCE SHIFT)
+        self.declare_parameter('sway_fwd_vel_frac', 0.9)      # sine: fore/aft sway peak speed / walking speed
         self.declare_parameter('ik_x_forward_sign', -1.0)     # +1 if IK +x is body-forward, -1 if backward
 
         # Neutral foot placement (mm, per-leg IK frame: +x forward, +y away from the body).
@@ -406,6 +464,16 @@ class GaitNode(Node):
         self.declare_parameter('cmd_vel_topic', '/spotmicro_move/cmd_vel')
         self.declare_parameter('cmd_vel_timeout_s', 0.6)
         self.declare_parameter('cmd_vel_turn_sign', 1.0)
+        # Autotune and two-point servo calibration (the Deck's Tune screen; see TUNE).
+        self.declare_parameter('tune_cmd_topic', '/spotmicro_move/tune_cmd')
+        self.declare_parameter('scan_topic', '/scan')
+        self.declare_parameter('base_frame', 'base_link')
+        self.declare_parameter('tune_distance_m', 1.0)
+        self.declare_parameter('tune_strafe_cycles', 2.0)
+        self.declare_parameter('tune_turn_deg', 180.0)
+        self.declare_parameter('tune_stick', 1.0)
+        self.declare_parameter('tune_min_clearance_m', 0.3)
+        self.declare_parameter('tune_body_radius_m', 0.2)   # lidar returns this close are the robot itself
 
         p = self.get_parameter
         self._joy_timeout = float(p('joy_timeout_s').value)
@@ -417,6 +485,7 @@ class GaitNode(Node):
         if str(p('gait_type').value) not in GAITS:
             raise ValueError(f"gait_type '{p('gait_type').value}' not in {list(GAITS)}")
         self._t = 0.0                    # gait clock, only advances while walking
+        self._sway_x_gain = 0.0          # sine sway: share of the fore/aft swing in use (follows the speed)
         self._z = float(p('stand_z').value)
         self._level_roll = 0.0           # deg, accumulated correction
         self._level_pitch = 0.0
@@ -475,7 +544,6 @@ class GaitNode(Node):
         self._cmd_vel = (0.0, 0.0, 0.0)   # forward, left (m/s), turn left (rad/s) from nav_node
         self._cmd_vel_time = 0.0
         self._cmd_vel_timeout = float(p('cmd_vel_timeout_s').value)
-        self._cmd_vel_turn_sign = 1.0 if float(p('cmd_vel_turn_sign').value) >= 0 else -1.0
         self._nav_manual = False          # left stick is overriding cmd_vel
         self._calib_chord = ChordDetector([_BTN[n] for n in calib_buttons], float(p('calib_hold_s').value))
         self._calib_buttons = calib_buttons
@@ -517,6 +585,20 @@ class GaitNode(Node):
                          for name in ('zero', *(f'axis_calib/{s}' for s in IMU_CAL_STEPS[:-1]))}
         self._note = None                 # last result for the Deck: {'seq', 'text', 'ok'}
         self._note_seq = 0
+        # Tune screen (see TUNE): autotune run / its last report, two-point servo calibration.
+        self._tuner = None                # autotune.AutoTune, kept after the run for its report
+        self._tune_outcome = ''           # '' | 'kept' | 'reverted'
+        self._tune_settled = False        # feet at the stand pose (autotune's Obs.settled)
+        self._tune_pool = None            # one worker thread for the scan matching
+        self._tune_future = None
+        self._scan_sub = None             # only while autotune runs
+        self._scan_pts = None             # newest scan, Nx2 base-frame points
+        self._scan_time = -1.0
+        self._tf_buffer = None
+        self._tf_listener = None
+        self._laser_pose = {}             # scan frame -> (x, y, yaw) in base_frame
+        self._servo_points = {}           # (leg, joint) -> [(servo deg, actual deg IK frame), ...]
+        self._servo_note = ''
         self._last_mode_pub = 0.0
         self._mode_pub = self.create_publisher(
             String, p('mode_topic').value,
@@ -549,7 +631,6 @@ class GaitNode(Node):
         self._odom = [0.0, 0.0, 0.0]     # x, y (m), yaw (rad) in the odom frame
         self._odom_v = (0.0, 0.0)        # body forward, left (m/s), set by _gait_tick
         self._imu_yaw = 0.0
-        self._odom_scale = float(p('odom_scale').value)
         self._tf = TransformBroadcaster(self)
         self._stable_pub = self.create_publisher(Bool, p('stable_topic').value, 10)
         # Latched, so deck_bridge (and the Deck's ARMED badge) see it at any time.
@@ -565,6 +646,7 @@ class GaitNode(Node):
         # Always subscribed (cheap) so leveling can be switched on live.
         self.create_subscription(Imu, p('imu_topic').value, self._on_imu, qos_profile_sensor_data)
         self.create_subscription(String, p('track_topic').value, self._on_track, 10)
+        self.create_subscription(String, p('tune_cmd_topic').value, self._on_tune_cmd, 10)
         self._control_dt = 1.0 / float(p('control_hz').value)
         self._jiggle_ticks_per_step = max(1, round(0.12 / self._control_dt))
         self._engage_ticks_per_leg = max(1, round(float(p('arm_leg_stagger_s').value) / self._control_dt))
@@ -611,16 +693,24 @@ class GaitNode(Node):
         self._gait_freq = max(float(p('gait_freq').value), 1e-3)
         gait_type = str(p('gait_type').value)
         self._gait_offsets, self._slot_frac = GAITS[gait_type]
-        # Trot keeps its old timing: no four-feet-down shift window.
-        self._shift_frac = min(max(float(p('shift_frac').value), 0.0), 0.9) if gait_type == 'crawl' else 0.0
-        self._shift_overlap = min(max(float(p('shift_overlap').value), 0.0), 0.5)
+        # Trot keeps its old timing: no four-feet-down shift window. crawl8 is
+        # fixed 8 equal phases: half of each slot shifting, half swinging, no overlap.
+        self._crawl8 = gait_type == 'crawl8'
+        if self._crawl8:
+            self._shift_frac, self._shift_overlap = 0.5, 0.0
+        else:
+            self._shift_frac = min(max(float(p('shift_frac').value), 0.0), 0.9) if gait_type == 'crawl' else 0.0
+            self._shift_overlap = min(max(float(p('shift_overlap').value), 0.0), 0.5)
         self._swing_start = self._slot_frac * self._shift_frac   # leg-local phase where swing begins
         # Legs in the order they swing, for looking up the previous slot's shift target.
         self._swing_order = sorted(self._gait_offsets, key=self._gait_offsets.get)
-        self._balance = bool(p('balance_enabled').value) and gait_type == 'crawl'
+        self._balance = bool(p('balance_enabled').value) and gait_type in CRAWLS
         self._bal_gain_y = float(p('balance_gain_lateral').value)
         self._bal_gain_x = float(p('balance_gain_fore_aft').value)
         self._bal_max = float(p('balance_max_shift').value)
+        self._c8_fwd = float(p('crawl8_shift_fwd').value)
+        self._c8_back = float(p('crawl8_shift_back').value)
+        self._c8_side = float(p('crawl8_shift_side').value)
         self._ik_x_sign = 1.0 if float(p('ik_x_forward_sign').value) >= 0 else -1.0
         self._stance_x_front = float(p('stance_x_front').value)
         self._stance_x_rear = float(p('stance_x_rear').value)
@@ -671,6 +761,15 @@ class GaitNode(Node):
         self._walk_heading_gain = float(p('walk_heading_gain').value)
         self._walk_heading_max = max(float(p('walk_heading_max').value), 0.0)
 
+        self._odom_scale = max(float(p('odom_scale').value), 0.05)
+        self._cmd_vel_turn_sign = 1.0 if float(p('cmd_vel_turn_sign').value) >= 0 else -1.0
+        self._turn_scale = max(float(p('turn_scale').value), 0.05)
+        self._walk_turn_trim = float(p('walk_turn_trim').value)
+
+        self._sway_sine = str(p('sway_profile').value) == 'sine'
+        self._sway_fwd_frac = max(float(p('sway_fwd_vel_frac').value), 0.0)
+        self._sway_fit = self._fit_sway() if self._balance else None
+
     def _validate_params(self, params):
         """Pre-set check for live changes: only LIVE_PARAMS, with sane values, and
         no gait_type switch mid-stride (the phase tables would jump the feet)."""
@@ -688,10 +787,18 @@ class GaitNode(Node):
                 if self._t > 0.0:
                     return SetParametersResult(successful=False,
                                                reason='stop walking before changing the gait')
+            if name == 'sway_profile':
+                if value not in ('step', 'sine'):
+                    return SetParametersResult(successful=False, reason="sway_profile must be 'step' or 'sine'")
+                if self._t > 0.0:
+                    return SetParametersResult(successful=False,
+                                               reason='stop walking before changing the sway')
             if name.startswith('trim_') and len(value) != 3:
                 return SetParametersResult(successful=False, reason=f'{name} must be [x, y, z]')
             if name == 'gait_freq' and value <= 0.0:
                 return SetParametersResult(successful=False, reason='gait_freq must be > 0')
+            if name in ('odom_scale', 'turn_scale') and value <= 0.0:
+                return SetParametersResult(successful=False, reason=f'{name} must be > 0')
         if merged['z_min'] >= merged['z_max']:
             return SetParametersResult(successful=False, reason='z_min must be below z_max')
         return SetParametersResult(successful=True)
@@ -899,7 +1006,7 @@ class GaitNode(Node):
             self._jiggle_tick_step()
             return
 
-        if self._mode not in ('walk', 'auto_nav'):
+        if self._mode not in ('walk', 'auto_nav', 'autotune'):
             self._decay_stab(dt)
         if self._mode == 'calibrate':
             self._calib_tick(joy, now, dt)
@@ -909,6 +1016,12 @@ class GaitNode(Node):
             return
         if self._mode == 'imu_calib':
             self._imu_cal_tick(now, dt)
+            return
+        if self._mode == 'autotune':
+            self._autotune_tick(joy, now, dt)
+            return
+        if self._mode == 'servo_cal':
+            self._servo_cal_tick(now, dt)
             return
 
         up = bool(joy.buttons[_BTN[self._up_button]])
@@ -921,8 +1034,9 @@ class GaitNode(Node):
             self._sentry_tick(joy, now, dt)
             return
 
-        # Stick-up reads as negative from the Deck, so flip it: forward = +.
-        vx = -_deadzone(joy.axes[_AX['left_y']], self._deadzone)
+        # The Deck app already sends stick-up as + (steamdeck_app input.rs), so
+        # forward = + here, the same sign as nav_node's cmd_vel linear.x.
+        vx = _deadzone(joy.axes[_AX['left_y']], self._deadzone)
         vy = _deadzone(joy.axes[_AX['left_x']], self._deadzone)     # strafe left = +
         wz = _deadzone(joy.axes[_AX['right_x']], self._deadzone)    # turn = +
         scale = self._speed_scale
@@ -958,7 +1072,7 @@ class GaitNode(Node):
         vx *= scale
         vy *= scale
         wz *= scale
-        wz = self._heading_hold(vx, vy, wz)
+        wz = self._heading_hold(vx, vy, wz) + self._walk_turn_trim * vx
 
         self._t += dt * self._gait_rate
         self._gait_tick(vx, vy, wz)
@@ -996,14 +1110,20 @@ class GaitNode(Node):
         k = 2e-3 * self._gait_freq / stance_len * self._odom_scale     # mm stride -> m/s
         vx = fwd / (self._step_length * k) if self._step_length > 0.0 else 0.0
         vy = left / (self._step_lateral * k) if self._step_lateral > 0.0 else 0.0
-        # A stance foot sweeps 2 * turn_gain mm of arc at its radius r (as in
-        # _turn_offset) per stance phase; average the front and rear radii.
+        w_full = self._turn_model_rate() * self._turn_scale   # rad/s at wz = 1
+        wz = self._cmd_vel_turn_sign * turn / w_full if self._turn_gain > 0.0 else 0.0
+        return (max(-1.0, min(1.0, vx)), max(-1.0, min(1.0, vy)), max(-1.0, min(1.0, wz)))
+
+    def _turn_model_rate(self):
+        """Turn rate (rad/s) at a full turn stick that the leg geometry predicts:
+        a stance foot sweeps 2 * turn_gain mm of arc at its radius r (as in
+        _turn_offset) per stance phase; front and rear radii averaged. Real
+        feet slip, so auto nav also multiplies by turn_scale (autotune measures it)."""
+        stance_len = 1.0 - (self._slot_frac - self._swing_start)
         side = self._half_width + self._stance_y
         r = 0.5 * (math.hypot(self._half_length + self._ik_x_sign * self._stance_x_front, side)
                    + math.hypot(-self._half_length + self._ik_x_sign * self._stance_x_rear, side))
-        w_full = 2.0 * self._turn_gain / r * self._gait_freq / stance_len   # rad/s at wz = 1
-        wz = self._cmd_vel_turn_sign * turn / w_full if self._turn_gain > 0.0 else 0.0
-        return (max(-1.0, min(1.0, vx)), max(-1.0, min(1.0, vy)), max(-1.0, min(1.0, wz)))
+        return 2.0 * self._turn_gain / r * self._gait_freq / stance_len
 
     # ── foot placement ───────────────────────────────────────────────────────
 
@@ -1122,16 +1242,63 @@ class GaitNode(Node):
     def _shift_target(self, leg):
         """Body shift (bx forward, by left, mm, body frame) that puts the centre
         of mass over the three feet left down while `leg` swings: the centroid
-        of the other three corners of the foot rectangle, i.e. -(corner)/3."""
+        of the other three corners of the foot rectangle, i.e. -(corner)/3.
+        crawl8 uses mike4192's fixed, front/back-asymmetric amounts instead."""
         sx = 1.0 if leg in FRONT else -1.0
         sy = 1.0 if leg in LEFT_SIDE else -1.0
+        if self._crawl8:
+            bx = -self._c8_back if leg in FRONT else self._c8_fwd
+            return bx, -sy * self._c8_side
         half_w = self._half_width + self._stance_y
         bx = -self._bal_gain_x * sx * self._half_length / 3.0
         by = -self._bal_gain_y * sy * half_w / 3.0
         lim = self._bal_max
         return max(-lim, min(lim, bx)), max(-lim, min(lim, by))
 
-    def _body_shift(self, phase, period):
+    def _fit_sway(self):
+        """For the sine sway: per axis (bx, by), the mean and the first two
+        harmonics (complex) of the gait cycle through each slot's shift target,
+        placed at the middle of that leg's swing. With four slots that curve
+        passes exactly through all four targets."""
+        n = len(self._swing_order)
+        mid = self._swing_start + 0.5 * (self._slot_frac - self._swing_start)
+        fit = []
+        for axis in (0, 1):
+            mean, c1, c2 = 0.0, 0j, 0j
+            for leg in self._swing_order:
+                v = self._shift_target(leg)[axis]
+                w = cmath.exp(-2j * math.pi * (self._gait_offsets[leg] + mid))
+                mean += v / n
+                c1 += 2.0 / n * v * w
+                c2 += 1.0 / n * v * w * w   # 4 slots: the 2nd harmonic is the Nyquist term
+            fit.append((mean, c1, c2))
+        return fit
+
+    def _sine_sway(self, phase, period, fwd):
+        """Smooth body sway (sway_profile 'sine', see BALANCE SHIFT). fwd = this
+        tick's forward stride (mm), which caps the fore/aft swing so the body
+        never moves backward while walking forward (or vice versa)."""
+        (mx, c1x, c2x), (my, c1y, c2y) = self._sway_fit
+        e1 = cmath.exp(2j * math.pi * phase)
+        e2 = e1 * e1
+        # Peak fore/aft sway speed and walking speed, both in mm per cycle.
+        stance_len = 1.0 - (self._slot_frac - self._swing_start)
+        osc = 2.0 * math.pi * (abs(c1x) + 2.0 * abs(c2x))
+        walk = 2.0 * abs(fwd) / stance_len
+        target = min(1.0, self._sway_fwd_frac * walk / osc) if osc > 1e-6 else 1.0
+        # Follow stick changes over ~0.3 s rather than jumping the body.
+        self._sway_x_gain += (target - self._sway_x_gain) * min(1.0, self._control_dt / 0.3)
+        bx = mx + self._sway_x_gain * ((c1x * e1).real + (c2x * e2).real)
+        by = my + (c1y * e1).real + (c2y * e2).real
+        # Ease in from the centred stand pose over the first four-feet-down window.
+        ramp = max(self._swing_start, 0.5 * self._slot_frac) * period
+        if self._t < ramp:
+            x = self._t / ramp
+            x = x * x * x * (x * (6.0 * x - 15.0) + 10.0)
+            bx, by = bx * x, by * x
+        return bx, by
+
+    def _body_shift(self, phase, period, fwd=0.0):
         """Scheduled body shift for this gait phase. Each slot's slide runs
         across its four-feet-down window AND spills `shift_overlap` of a swing
         into the neighbouring swings (the last bit of the previous leg's swing,
@@ -1142,6 +1309,8 @@ class GaitNode(Node):
         starting to walk slides from zero (the body starts centred)."""
         if not self._balance:
             return 0.0, 0.0
+        if self._sway_sine:
+            return self._sine_sway(phase, period, fwd)
         n = len(self._swing_order)
         k = int(phase / self._slot_frac) % n
         u = (phase - self._gait_offsets[self._swing_order[k]]) / self._slot_frac   # 0..1 in slot
@@ -1194,14 +1363,16 @@ class GaitNode(Node):
         mag = math.sqrt(vx * vx + vy * vy + wz * wz)
         if mag > 1.0:
             vx, vy, wz = vx / mag, vy / mag, wz / mag
-        stride_x = self._step_length * vx
+        # stride_x is in IK x (ik_x_sign maps body-forward onto it); fwd is body frame.
+        fwd = self._step_length * vx
+        stride_x = self._ik_x_sign * fwd
         stride_y = self._step_lateral * vy
-        bx, by = self._body_shift(phase, period)
+        bx, by = self._body_shift(phase, period, fwd)
 
         swing_len = self._slot_frac - self._swing_start
         stance_len = 1.0 - swing_len
         k = 2e-3 * self._gait_freq * self._gait_rate / stance_len * self._odom_scale   # mm stride -> m/s
-        self._odom_v = (stride_x * k, stride_y * k)
+        self._odom_v = (fwd * k, stride_y * k)
         if self._stabilising() and self._walk_com_gain != 0.0:
             # Lean the body away from the side it is tipping toward (+roll =
             # right side down -> shift left; +pitch = nose down -> shift back).
@@ -1235,9 +1406,8 @@ class GaitNode(Node):
 
             tx, ty = self._turn_offset(leg, wz, s)
             # IK y is per-leg "outward", so a body-frame strafe is +y on the
-            # left legs and -y on the right legs. stride_x deliberately does NOT
-            # go through ik_x_sign: applying it (2026-10-13) made a forward
-            # stick walk backward on the real robot.
+            # left legs and -y on the right legs. stride_x goes through ik_x_sign
+            # (IK +x points backward): a stance foot sweeps toward the rear.
             dx = stride_x * s + tx
             dy = side * stride_y * s + ty
             r = math.hypot(dx, dy)
@@ -1268,6 +1438,8 @@ class GaitNode(Node):
         imu_cal = self._imu_cal_chord.update(joy.buttons, now)
         trick = self._trick_input(joy, now)
         ready = self._armed and not self._engage_queue and not self._jiggle_queue
+        if self._mode in TUNE_MODES:
+            return   # driven from the Deck's Tune screen; it ends them (or B / disarm)
 
         if nav:
             if not ready:
@@ -1518,10 +1690,12 @@ class GaitNode(Node):
         old = self._mode
         if mode == old:
             return
-        if old == 'calibrate':
+        if old in ('calibrate', 'servo_cal'):
             self._save_calibration()
             self._calib_angle_mode = False
             self._calib_slew = {}
+        if old == 'autotune':
+            self._end_autotune('Stopped')
         if old == 'trick':
             self._trick = None
         if old == 'imu_calib':
@@ -1542,6 +1716,16 @@ class GaitNode(Node):
             self.get_logger().info(f'TRICK: {self._trick["name"]} (press "{self._trick_button}" to stop).')
         elif mode == 'imu_calib':
             pass   # _start_imu_cal logs it
+        elif mode == 'autotune':
+            self.get_logger().warn('AUTOTUNE: the robot walks its test course by itself. '
+                                   'Touch a stick or press B to stop it.')
+        elif mode == 'servo_cal':
+            self._calib_note = ''
+            self._servo_note = ''
+            self._calib_angle_mode = True     # the selected joint goes to its test angle
+            leg, joint = LEGS[self._calib_leg], JOINTS[self._calib_joint]
+            self.get_logger().warn(f'SERVO CALIBRATION (two-point, from the Deck): feet to IK '
+                                   f'{self._calib_pose}; now on {leg} {joint}.')
         elif mode == 'auto_nav':
             self._nav_manual = False
             self.get_logger().info('AUTO NAV mode: walking to goals from nav_node (double-tap '
@@ -1556,8 +1740,10 @@ class GaitNode(Node):
 
     def _exit_mode(self):
         """On disarm / fault: back to walk, saving any calibration changes."""
-        if self._mode == 'calibrate':
+        if self._mode in ('calibrate', 'servo_cal'):
             self._save_calibration()
+        if self._mode == 'autotune':
+            self._end_autotune('Stopped: disarmed')
         self._calib_angle_mode = False
         self._calib_slew = {}
         if self._mode == 'imu_calib':
@@ -1586,6 +1772,10 @@ class GaitNode(Node):
                 msg['imu_calib'].update(tilt=c['tilt'], need=IMU_CAL_TILT_DEG, hold=c['hold'], hint=c['hint'])
         if self._note:
             msg['note'] = self._note
+        if self._tuner is not None:
+            msg['tune'] = dict(self._tuner.report(), outcome=self._tune_outcome)
+        if self._mode == 'servo_cal':
+            msg['servo_cal'] = self._servo_cal_status()
         if self._mode == 'calibrate' or self._calib_note:
             leg, joint = LEGS[self._calib_leg], JOINTS[self._calib_joint]
             msg['calib'] = {
@@ -1790,6 +1980,289 @@ class GaitNode(Node):
         self._calib_note = f'saved to {name}'
         self.get_logger().info(f'Servo offsets saved to {self._calibration_path}')
 
+    # ── Tune screen: autotune and two-point servo calibration ───────────────
+
+    def _on_tune_cmd(self, msg):
+        """A command from the Deck's Tune screen (deck_bridge relays <p>/deck/tune;
+        see spot_micro_deck/protocol.py decode_tune)."""
+        try:
+            cmd = json.loads(msg.data)
+            name = cmd['cmd']
+        except (ValueError, KeyError, TypeError):
+            self.get_logger().warn(f'Bad tune command: {msg.data!r}')
+            return
+        ready = self._armed and not self._engage_queue and not self._jiggle_queue
+        if name in ('autotune_start', 'servo_start'):
+            target = 'autotune' if name == 'autotune_start' else 'servo_cal'
+            if self._mode == target:
+                return
+            if not ready:
+                self._notify('Arm the robot first (hold L3+R3)', False)
+            elif self._mode != 'walk':
+                self._notify(f'Leave {self._mode.replace("_", " ")} mode first', False)
+            elif target == 'autotune':
+                self._start_autotune()
+            else:
+                self._set_mode('servo_cal')
+        elif name == 'autotune_stop':
+            if self._mode == 'autotune':
+                self._end_autotune('Stopped from the Deck')
+                self._set_mode('walk')
+        elif name == 'autotune_revert':
+            self._tune_revert()
+        elif name == 'autotune_keep':
+            # deck_bridge writes the values into move_params.yaml; this only labels the report.
+            if self._tuner is not None and self._tuner.state != 'running':
+                self._tune_outcome = 'kept'
+                self._publish_mode()
+        elif name == 'autotune_clear':
+            if self._mode != 'autotune':
+                self._tuner = None
+                self._tune_outcome = ''
+                self._publish_mode()
+        elif name == 'servo_stop':
+            if self._mode == 'servo_cal':
+                self._set_mode('walk')
+        elif self._mode != 'servo_cal':
+            self.get_logger().info(f'Tune command "{name}" needs servo calibration mode.')
+        elif name == 'servo_select':
+            self._servo_select(cmd.get('leg'), cmd.get('joint'))
+        elif name == 'servo_jog':
+            # The Deck jogs the joint's real angle; right legs are mirrored in the IK frame.
+            delta = float(cmd.get('delta', 0.0))
+            self._adjust_angle_target(-delta if LEGS[self._calib_leg] in RIGHT_LEGS else delta)
+            self._publish_mode()
+        elif name == 'servo_record':
+            self._servo_record(cmd.get('actual'))
+        elif name == 'servo_apply':
+            self._servo_apply()
+        elif name == 'servo_clear':
+            self._servo_points.pop((LEGS[self._calib_leg], JOINTS[self._calib_joint]), None)
+            self._servo_note = 'points cleared'
+            self._publish_mode()
+        else:
+            self.get_logger().warn(f'Unknown tune command "{name}"')
+
+    def _tune_params(self):
+        """What autotune's analysis reads (see autotune.AutoTune)."""
+        p = self.get_parameter
+        out = {k: p(k).value for k in ('odom_scale', 'turn_scale', 'walk_turn_trim', 'cmd_vel_turn_sign',
+                                       'speed_scale', 'gait_type', 'balance_enabled', 'balance_gain_lateral',
+                                       'balance_gain_fore_aft', 'crawl8_shift_side')}
+        out['turn_model_rate'] = self._turn_model_rate()
+        return out
+
+    def _start_autotune(self):
+        p = self.get_parameter
+        cfg = autotune.TuneConfig(
+            distance_m=float(p('tune_distance_m').value), strafe_cycles=float(p('tune_strafe_cycles').value),
+            turn_deg=float(p('tune_turn_deg').value), stick=min(max(float(p('tune_stick').value), 0.1), 1.0),
+            min_clearance_m=float(p('tune_min_clearance_m').value))
+        self._tuner = autotune.AutoTune(self._tune_params(), cfg)
+        self._tune_outcome = ''
+        self._tune_future = None
+        self._scan_pts, self._scan_time = None, -1.0
+        if self._tf_buffer is None:
+            self._tf_buffer = Buffer()
+            self._tf_listener = TransformListener(self._tf_buffer, self)
+        if self._scan_sub is None:
+            self._scan_sub = self.create_subscription(
+                LaserScan, p('scan_topic').value, self._on_scan, qos_profile_sensor_data)
+        self._set_mode('autotune')
+
+    def _end_autotune(self, why):
+        """Stop the run (its report and changes stay) and the lidar subscription."""
+        if self._tuner is not None:
+            self._tuner.stop(why)
+        if self._scan_sub is not None:
+            self.destroy_subscription(self._scan_sub)
+            self._scan_sub = None
+        self._scan_pts = None
+        self._tune_future = None
+
+    def _on_scan(self, msg):
+        pose = self._laser_pose.get(msg.header.frame_id)
+        if pose is None:
+            try:
+                t = self._tf_buffer.lookup_transform(
+                    str(self.get_parameter('base_frame').value), msg.header.frame_id or 'laser', Time())
+                q = t.transform.rotation
+                pose = (t.transform.translation.x, t.transform.translation.y,
+                        math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z)))
+                self._laser_pose[msg.header.frame_id] = pose   # static: look it up once
+            except TransformException:
+                pose = (0.0, 0.0, 0.0)
+                self.get_logger().warn('No TF for the lidar yet; assuming it sits at the body centre.',
+                                       throttle_duration_sec=10.0)
+        self._scan_pts = scan_match.scan_points(
+            msg.ranges, msg.angle_min, msg.angle_increment, msg.range_min, msg.range_max, pose,
+            body_radius=float(self.get_parameter('tune_body_radius_m').value))
+        self._scan_time = time.monotonic()
+
+    def _autotune_tick(self, joy, now, dt):
+        tuner = self._tuner
+        stick = any(abs(joy.axes[_AX[a]]) > max(self._deadzone, 0.3)
+                    for a in ('left_x', 'left_y', 'right_x', 'right_y'))
+        imu = None
+        if self._imu_fresh():
+            imu = (self._imu_rp[0], self._imu_rp[1], self._imu_yaw)
+        obs = autotune.Obs(t=now, odom=tuple(self._odom), imu=imu, still=self._imu_rate < 0.15,
+                           settled=self._tune_settled, cycles=self._t * self._gait_freq,
+                           scan=self._scan_pts, scan_t=self._scan_time, stick=stick)
+        cmd = tuner.step(obs)
+        if cmd.apply:
+            self._tune_apply(cmd.apply)
+        if tuner.want_match is not None:
+            if self._tune_pool is None:
+                self._tune_pool = ThreadPoolExecutor(max_workers=1)
+            # A few hundred ms of numpy: off the control loop's thread.
+            self._tune_future = self._tune_pool.submit(scan_match.match, *tuner.want_match)
+            tuner.want_match = None
+        if self._tune_future is not None and self._tune_future.done():
+            try:
+                tuner.on_match(self._tune_future.result())
+            except Exception as e:   # noqa: BLE001 — a failed match just isn't used
+                self.get_logger().warn(f'Scan match failed: {e}')
+                tuner.on_match(scan_match.Match())
+            self._tune_future = None
+
+        drive = cmd.drive
+        self._update_leveling(dt, drive is not None)
+        if drive is None:
+            self._t = 0.0
+            self._tune_settled = self._settle_tick(dt)
+        else:
+            self._tune_settled = False
+            vx, vy, wz = (v * self._speed_scale for v in drive)
+            # No heading hold here: the veer is what the test measures. The trim stays on,
+            # so what it measures is what is left to trim.
+            wz += self._walk_turn_trim * vx
+            self._t += dt * self._gait_rate
+            self._gait_tick(vx, vy, wz)
+        if tuner.state != 'running':
+            ok = tuner.state == 'done'
+            n = len(tuner.changes)
+            self._notify(f'Autotune done: {n} change{"" if n == 1 else "s"} — keep or revert them'
+                         if ok else f'Autotune: {tuner.message}', ok)
+            self._set_mode('walk')
+        elif now - self._last_mode_pub >= 0.2:
+            self._publish_mode()
+
+    def _tune_apply(self, values):
+        """Set parameters on ourselves, through the same checks as a live change."""
+        for key, value in values.items():
+            if isinstance(value, int) and not isinstance(value, bool):
+                value = float(value)
+            result = self.set_parameters([Parameter(key, value=value)])[0]
+            if not result.successful:
+                self.get_logger().warn(f'Autotune could not set {key}={value}: {result.reason}')
+            else:
+                self.get_logger().info(f'Autotune: {key} -> {value}')
+
+    def _tune_revert(self):
+        tuner = self._tuner
+        if tuner is None or tuner.state == 'running' or not tuner.original:
+            return
+        self._tune_apply(tuner.original)
+        self._tune_outcome = 'reverted'
+        self._notify('Autotune changes reverted', True)
+
+    def _geom(self, leg, angle):
+        """IK-frame servo angle <-> the joint's real angle (the same for every leg:
+        right legs are mirrored in the IK frame). Its own inverse."""
+        return 180.0 - angle if leg in RIGHT_LEGS else angle
+
+    def _servo_select(self, leg, joint):
+        if leg not in LEGS or joint not in JOINTS:
+            self.get_logger().warn(f'servo_select: unknown {leg} {joint}')
+            return
+        self._calib_leg, self._calib_joint = LEGS.index(leg), JOINTS.index(joint)
+        self._servo_note = ''
+        self._publish_mode()
+
+    def _servo_record(self, actual):
+        """Record a point: the selected joint is at its test angle and really sits
+        at `actual` degrees (the joint's real angle, see _geom)."""
+        leg, joint = LEGS[self._calib_leg], JOINTS[self._calib_joint]
+        key = (leg, joint)
+        try:
+            actual = float(actual)
+        except (TypeError, ValueError):
+            return
+        now_at = self._calib_slew.get(key)
+        target = self._calib_target(leg, joint)
+        if now_at is None or abs(now_at - target) > 0.05:
+            self._servo_note = 'wait for the joint to stop moving'
+        else:
+            servo = self.dog.legs[leg].servo_command(joint, now_at)
+            rng = getattr(self._calibration[leg], joint).range
+            if not 0.5 < servo < rng - 0.5:
+                self._servo_note = 'the servo is at the end of its travel there: pick another angle'
+            else:
+                pts = self._servo_points.setdefault(key, [])
+                pts.append((round(servo, 2), round(self._geom(leg, actual), 2)))
+                del pts[:-2]
+                self._servo_note = f'point {len(pts)} recorded'
+                self.get_logger().info(f'{leg} {joint}: servo {servo:.2f} deg = really {actual:.2f} deg')
+        self._publish_mode()
+
+    def _servo_fit(self, leg, joint):
+        """(offset, scale) from the recorded points, or a reason string."""
+        pts = self._servo_points.get((leg, joint))
+        if not pts:
+            return 'no points recorded'
+        try:
+            return fit_joint(pts, getattr(self._calibration[leg], joint).scale)
+        except ValueError as e:
+            return str(e)
+
+    def _servo_apply(self):
+        leg, joint = LEGS[self._calib_leg], JOINTS[self._calib_joint]
+        fit = self._servo_fit(leg, joint)
+        if isinstance(fit, str):
+            self._servo_note = fit
+        else:
+            offset, scale = fit
+            if abs(offset) > self._calib_max:
+                self._servo_note = f'offset {offset:+.1f} is past ±{self._calib_max:.0f}: re-check the angles'
+            else:
+                old = getattr(self._calibration[leg], joint)
+                self._calibration[leg] = with_cal(self._calibration[leg], joint, offset, scale)
+                if self.dog is not None:
+                    self.dog.legs[leg].cal = self._calibration[leg]
+                self._calib_dirty = True
+                self._servo_note = (f'applied: offset {old.offset:+.2f} -> {offset:+.2f}, '
+                                    f'scale {old.scale:.3f} -> {scale:.3f}')
+                self.get_logger().info(f'{leg} {joint} {self._servo_note}')
+        self._publish_mode()
+
+    def _servo_cal_tick(self, now, dt):
+        """Feet at calib_pose (plain IK); the selected joint held at its test angle."""
+        self._calib_slew_tick(dt)
+        x, y, z = self._calib_pose
+        self._move_toward({leg: [x, y, z] for leg in LEGS}, dt, self._settle_speed, raw=True)
+        if now - self._last_mode_pub >= 0.2:
+            self._publish_mode()
+
+    def _servo_cal_status(self):
+        leg, joint = LEGS[self._calib_leg], JOINTS[self._calib_joint]
+        out = {'leg': leg, 'joint': joint, 'note': self._servo_note or self._calib_note,
+               'unsaved': self._calib_dirty,
+               'cal': {lg: [[getattr(self._calibration[lg], j).offset, getattr(self._calibration[lg], j).scale]
+                            for j in JOINTS] for lg in LEGS},
+               'points': [{'servo': c, 'actual': round(self._geom(leg, a), 2)}
+                          for c, a in self._servo_points.get((leg, joint), [])],
+               'done': sorted(f'{lg} {j}' for (lg, j), pts in self._servo_points.items() if len(pts) >= 2)}
+        if self.dog is not None and self._feet is not None:
+            target = self._calib_target(leg, joint)
+            at = self._calib_slew.get((leg, joint), target)
+            out.update(target=round(self._geom(leg, target), 2), angle=round(self._geom(leg, at), 2),
+                       servo=round(self.dog.legs[leg].servo_command(joint, at), 2),
+                       moving=abs(at - target) > 0.05)
+        fit = self._servo_fit(leg, joint)
+        out['fit'] = {'error': fit} if isinstance(fit, str) else {'offset': fit[0], 'scale': fit[1]}
+        return out
+
     # ── arm / disarm ─────────────────────────────────────────────────────────
 
     def _toggle_armed(self):
@@ -1876,8 +2349,10 @@ class GaitNode(Node):
             self._jiggle_queue.pop(0)
 
     def destroy_node(self):
-        if self._mode == 'calibrate':
+        if self._mode in ('calibrate', 'servo_cal'):
             self._save_calibration()
+        if self._tune_pool is not None:
+            self._tune_pool.shutdown(wait=False, cancel_futures=True)
         try:
             if self.dog is not None:
                 self.dog.release()

@@ -18,7 +18,10 @@ pub struct InputState {
 /// Things the UI should react to, beyond the raw input state.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Action {
+    /// R2: next view.
     NextView,
+    /// L2: previous view.
+    PrevView,
     /// Start / menu button: open or close the settings menu.
     ToggleMenu,
     /// View (⧉) button: open or close the controls & tricks reference.
@@ -26,10 +29,13 @@ pub enum Action {
     Nav(Dir),
     /// A: toggle / cycle the selected setting.
     Confirm,
-    /// X: set up Wi-Fi over Bluetooth (only acted on while there's no link).
-    Bluetooth,
-    /// Y: in auto nav, start / cancel placing the robot on the map.
+    /// X: tricks on the robot; stop / revert / clear in auto nav, sentry and the Tune screen.
+    /// (Wi-Fi setup over Bluetooth is a settings-menu row, so X can't start it by accident.)
+    X,
+    /// Y: in auto nav, start / cancel placing the robot on the map; back on the Tune screen.
     Place,
+    /// Any back grip (L4 / R4 / L5 / R5): open or close the Tune screen.
+    ToggleTune,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -139,8 +145,9 @@ impl Gamepad {
                     Button::Start => Some(Action::ToggleMenu),
                     Button::Back => Some(Action::ToggleControls),
                     Button::A => Some(Action::Confirm),
-                    Button::X => Some(Action::Bluetooth),
+                    Button::X => Some(Action::X),
                     Button::Y => Some(Action::Place),
+                    Button::Paddle1 | Button::Paddle2 | Button::Paddle3 | Button::Paddle4 => Some(Action::ToggleTune),
                     b => dpad_dir(b).map(|d| {
                         self.repeat.press(d, Instant::now());
                         Action::Nav(d)
@@ -174,7 +181,7 @@ impl Gamepad {
                 let was_down = self.state.buttons[BTN_L2];
                 if !was_down && f > TRIGGER_PRESS {
                     self.state.buttons[BTN_L2] = true;
-                    return Some(Action::NextView);
+                    return Some(Action::PrevView);
                 } else if was_down && f < TRIGGER_RELEASE {
                     self.state.buttons[BTN_L2] = false;
                 }
@@ -185,6 +192,7 @@ impl Gamepad {
                 let was_down = self.state.buttons[BTN_R2];
                 if !was_down && f > TRIGGER_PRESS {
                     self.state.buttons[BTN_R2] = true;
+                    return Some(Action::NextView);
                 } else if was_down && f < TRIGGER_RELEASE {
                     self.state.buttons[BTN_R2] = false;
                 }
@@ -203,18 +211,28 @@ mod tests {
     }
 
     #[test]
-    fn l2_press_changes_view_once_per_pull() {
+    fn r2_press_changes_view_once_per_pull() {
         let mut pad = Gamepad::default();
-        assert_eq!(pad.handle(&axis_event(Axis::TriggerLeft, 10_000)), None); // light touch
-        assert_eq!(pad.handle(&axis_event(Axis::TriggerLeft, 25_000)), Some(Action::NextView));
+        assert_eq!(pad.handle(&axis_event(Axis::TriggerRight, 10_000)), None); // light touch
+        assert_eq!(pad.handle(&axis_event(Axis::TriggerRight, 25_000)), Some(Action::NextView));
         // still held / wobbling above the release threshold: no repeat
-        assert_eq!(pad.handle(&axis_event(Axis::TriggerLeft, 32_767)), None);
-        assert_eq!(pad.handle(&axis_event(Axis::TriggerLeft, 15_000)), None);
-        assert!(pad.state.buttons[BTN_L2]);
+        assert_eq!(pad.handle(&axis_event(Axis::TriggerRight, 32_767)), None);
+        assert_eq!(pad.handle(&axis_event(Axis::TriggerRight, 15_000)), None);
+        assert!(pad.state.buttons[BTN_R2]);
         // release, then a second pull switches again
+        assert_eq!(pad.handle(&axis_event(Axis::TriggerRight, 0)), None);
+        assert!(!pad.state.buttons[BTN_R2]);
+        assert_eq!(pad.handle(&axis_event(Axis::TriggerRight, 32_767)), Some(Action::NextView));
+    }
+
+    #[test]
+    fn l2_press_goes_back_a_view() {
+        let mut pad = Gamepad::default();
+        assert_eq!(pad.handle(&axis_event(Axis::TriggerLeft, 25_000)), Some(Action::PrevView));
+        assert_eq!(pad.handle(&axis_event(Axis::TriggerLeft, 32_767)), None);
+        assert!(pad.state.buttons[BTN_L2]);
         assert_eq!(pad.handle(&axis_event(Axis::TriggerLeft, 0)), None);
         assert!(!pad.state.buttons[BTN_L2]);
-        assert_eq!(pad.handle(&axis_event(Axis::TriggerLeft, 32_767)), Some(Action::NextView));
     }
 
     #[test]
@@ -250,6 +268,9 @@ mod tests {
         assert_eq!(pad.handle(&down(Button::DPadDown)), Some(Action::Nav(Dir::Down)));
         assert_eq!(pad.handle(&down(Button::A)), Some(Action::Confirm));
         assert!(pad.state.buttons[7] && pad.state.buttons[12], "still forwarded to the robot");
+        for b in [Button::Paddle1, Button::Paddle2, Button::Paddle3, Button::Paddle4] {
+            assert_eq!(pad.handle(&down(b)), Some(Action::ToggleTune));
+        }
     }
 
     #[test]
@@ -277,5 +298,8 @@ mod tests {
         }
         assert_eq!(seen[4], seen[0]);
         assert_eq!(seen.len(), 5);
+        for v in crate::shared::View::ALL {
+            assert_eq!(v.next().prev(), v);
+        }
     }
 }

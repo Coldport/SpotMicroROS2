@@ -30,10 +30,19 @@ The Deck has no ROS install, so it talks to the robot through a Mosquitto broker
     "The robot is here" from the Deck reloads the saved pose graph into
     slam_toolbox with the robot at that pose (START_AT_GIVEN_POSE), so a robot
     that didn't start where the map was begun can still navigate on it.
+  * Tune screen: autotune / two-point servo calibration commands from the Deck
+    go to gait_node (`tune_cmd_topic`). "Keep" after an autotune run also
+    writes the run's parameter changes (from gait_node's mode message) into
+    the gait params files, like a settings change.
 
 Camera and lidar subscriptions only exist while a Deck is online and looking at
 that view, and depth is only colorized/encoded while the depth view is on
-screen, so an idle robot spends no CPU on any of it.
+screen, so an idle robot spends no CPU on any of it. With `camera_off_in_map`,
+the camera itself stops capturing while the Deck sits on the map view and
+nothing else (track_node, a viewer) subscribes to its color stream: usb_cam
+through its set_capture service, the RealSense by switching its color and
+depth streams off. It starts again when the Deck leaves the map view or goes
+offline.
 
 Publishes (namespaced under 'spotmicro_deck'):
   joy        sensor_msgs/Joy   Deck buttons/sticks/triggers. Axis and button
@@ -67,6 +76,7 @@ from sensor_msgs.msg import CompressedImage, Image, Imu, Joy, LaserScan
 from geometry_msgs.msg import PoseStamped
 from slam_toolbox.srv import DeserializePoseGraph, Reset, SaveMap, SerializePoseGraph
 from std_msgs.msg import Bool, Empty, Int32, String
+from std_srvs.srv import SetBool
 
 from spot_micro_deck import audio
 from spot_micro_deck import param_file
@@ -88,6 +98,10 @@ _NO_RETURN_MM = 0xFFFF
 _MAX_SCAN_POINTS = 2048
 _VIEW_HEARTBEAT_TIMEOUT_S = 3.0
 _CAMERA_CHECK_S = 2.0
+# Map view this long before the camera is stopped, so flicking past it with L2/R2
+# doesn't restart the camera each time. A RealSense stream restart can take seconds.
+_CAMERA_OFF_DELAY_S = 1.5
+_CAMERA_CALL_TIMEOUT_S = 10.0
 _SETTINGS_PERIOD_S = 1.0
 _SAVE_DELAY_S = 1.5          # write params files once the D-pad has been still this long
 # A parameter-service reply that hasn't come back by then is treated as lost. The
@@ -165,6 +179,12 @@ class DeckBridge(Node):
         # Sentry object tracking (spot_micro_move track_node).
         self.declare_parameter('track_cmd_topic', '/spotmicro_track/cmd')
         self.declare_parameter('track_status_topic', '/spotmicro_track/status')
+        # Tune screen (gait_node autotune / servo_cal).
+        self.declare_parameter('tune_cmd_topic', '/spotmicro_move/tune_cmd')
+        # Stop the camera while the Deck shows the map (see the module docstring).
+        self.declare_parameter('camera_off_in_map', True)
+        self.declare_parameter('usb_capture_service', '/spotmicro_cam/set_capture')
+        self.declare_parameter('realsense_node', '/spotmicro_cam/d405')
 
         p = self.get_parameter
         self._t = P.topics(p('topic_prefix').value)
@@ -213,6 +233,12 @@ class DeckBridge(Node):
         }
         self._color_topics = {'realsense': p('color_topic').value, 'usb': p('usb_color_topic').value}
         self._camera = {'type': None, 'model': '', 'depth': False, 'streaming': False}
+        self._camera_off_in_map = bool(p('camera_off_in_map').value)
+        self._usb_capture = self.create_client(SetBool, p('usb_capture_service').value)
+        self._realsense_params = AsyncParameterClient(self, p('realsense_node').value)
+        self._camera_on = True         # the drivers start capturing
+        self._camera_call = None       # monotonic time of the outstanding on/off call, or None
+        self._map_view_since = None
 
         # Settings: gait_node's are read/written through its parameter services.
         self._gait_params = AsyncParameterClient(self, p('gait_node').value)
@@ -224,6 +250,7 @@ class DeckBridge(Node):
         self._armed = False
         self._mode = None              # gait_node's mode message (dict), see _on_mode
         self._set_queue = []           # (key, value) from the MQTT thread
+        self._tune_queue = []          # deck/tune commands from the MQTT thread
         self._last_settings = 0.0
         self._save_files = {t: self._params_files(p(f'{t}_params_files').value)
                             for t in ('gait', 'bridge')}
@@ -249,6 +276,7 @@ class DeckBridge(Node):
                        reliability=ReliabilityPolicy.RELIABLE))
         self._track_cmd_pub = self.create_publisher(String, p('track_cmd_topic').value, 10)
         self.create_subscription(String, p('track_status_topic').value, self._on_track_status, 10)
+        self._tune_pub = self.create_publisher(String, p('tune_cmd_topic').value, 10)
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
@@ -316,7 +344,8 @@ class DeckBridge(Node):
         self.get_logger().info('Connected to MQTT broker.')
         client.subscribe([(self._t['deck_online'], 1), (self._t['deck_view'], 0),
                           (self._t['deck_input'], 0), (self._t['deck_set'], 1),
-                          (self._t['deck_nav'], 1), (self._t['deck_track'], 1)])
+                          (self._t['deck_nav'], 1), (self._t['deck_track'], 1),
+                          (self._t['deck_tune'], 1)])
         client.publish(self._t['robot_online'], '1', qos=1, retain=True)
         if self._map_payload is not None:
             client.publish(self._t['map'], self._map_payload, qos=1, retain=True)
@@ -340,6 +369,10 @@ class DeckBridge(Node):
                 self._handle_nav(P.decode_nav(msg.payload))
             elif msg.topic == self._t['deck_track']:
                 self._handle_track(P.decode_track(msg.payload))
+            elif msg.topic == self._t['deck_tune']:
+                cmd = P.decode_tune(msg.payload)
+                with self._lock:
+                    self._tune_queue.append(cmd)
             elif msg.topic == self._t['deck_online']:
                 self._handle_deck_online(msg.payload.decode('utf-8', 'replace').strip() == '1')
         except Exception as exc:   # never let a bad message kill the MQTT thread
@@ -374,6 +407,32 @@ class DeckBridge(Node):
     def _handle_track(self, cmd):
         out = {'cmd': 'stop'} if cmd[0] == 'stop' else {'cmd': 'start', 'box': cmd[1]}
         self._track_cmd_pub.publish(String(data=json.dumps(out, separators=(',', ':'))))
+
+    def _handle_tune(self, cmd):
+        """ROS thread: relay a Tune-screen command; "keep" also saves the run's changes."""
+        if cmd['cmd'] == 'autotune_keep':
+            self._keep_autotune()
+        self._tune_pub.publish(String(data=json.dumps(cmd, separators=(',', ':'))))
+
+    def _keep_autotune(self):
+        key = 'autotune_keep'
+        tune = (self._mode or {}).get('tune') if self._gait_running else None
+        if not tune or tune.get('state') == 'running':
+            self._ack(key, False, None, 'no finished autotune run to keep')
+            return
+        values = {c['key']: c['new'] for c in tune.get('changes', [])
+                  if isinstance(c, dict) and 'key' in c and 'new' in c}
+        if not values:
+            self._ack(key, True, None, 'Nothing to save — autotune changed nothing')
+            return
+        if not self._save_files['gait']:
+            self._ack(key, False, None, 'kept until restart: no params file to save into')
+            return
+        self._unsaved['gait'].update(values)
+        self.save_settings()
+        self._gait_values.update(values)
+        self._ack(key, True, None, f'Saved {len(values)} setting{"" if len(values) == 1 else "s"} '
+                                   'to move_params.yaml')
 
     def _on_track_status(self, msg):
         # Small and only frequent while tracking: straight through, for the Deck's box overlay.
@@ -463,6 +522,58 @@ class DeckBridge(Node):
                 self._subs[name] = factories[name]()
             elif not want and name in self._subs:
                 self.destroy_subscription(self._subs.pop(name))
+        self._reconcile_camera(active and view == 'map')
+
+    def _reconcile_camera(self, map_view):
+        """Camera off while the Deck shows the map and nothing else wants frames."""
+        now = time.monotonic()
+        if not map_view:
+            self._map_view_since = None
+        elif self._map_view_since is None:
+            self._map_view_since = now
+        if self._camera_call is not None:
+            if now - self._camera_call < _CAMERA_CALL_TIMEOUT_S:
+                return
+            self._camera_call = None       # lost reply: try again
+        # Our own color subscription is already gone in the map view, so any
+        # subscriber left is someone else (track_node following a target, a viewer).
+        want_on = not (self._camera_off_in_map and map_view
+                       and now - self._map_view_since >= _CAMERA_OFF_DELAY_S
+                       and self.count_subscribers(self._color_topic()) == 0)
+        kind = self._camera['type']
+        if want_on == self._camera_on or not self._camera['streaming']:
+            return
+
+        def done(future):
+            self._camera_call = None
+            try:
+                res = future.result()
+                # usb_cam (0.8.1) answers success=False even when it did switch,
+                # so for it any reply counts.
+                ok = kind == 'usb' or all(r.successful for r in res.results)
+            except Exception as exc:   # driver went away mid-call
+                ok, res = False, exc
+            if not ok:
+                self.get_logger().warn(f'Turning the camera {"on" if want_on else "off"} '
+                                       f'failed: {res}', throttle_duration_sec=10.0)
+                return
+            self._camera_on = want_on
+            self.get_logger().info('Camera back on.' if want_on else
+                                   'Map view: camera stopped until the Deck leaves it.')
+
+        if kind == 'usb':
+            if not self._usb_capture.service_is_ready():
+                return
+            self._usb_capture.call_async(SetBool.Request(data=want_on)).add_done_callback(done)
+        elif kind == 'realsense':
+            if not self._realsense_params.services_are_ready():
+                return
+            self._realsense_params.set_parameters(
+                [Parameter('enable_color', value=want_on),
+                 Parameter('enable_depth', value=want_on)], done)
+        else:
+            return
+        self._camera_call = now
 
     def _reconcile_mic(self, active):
         """Run the mic while a Deck is online and wants it; restart it when the
@@ -709,8 +820,11 @@ class DeckBridge(Node):
     def _settings_tick(self):
         with self._lock:
             queue, self._set_queue = self._set_queue, []
+            tune, self._tune_queue = self._tune_queue, []
         for key, value in queue:
             self._apply_setting(key, value)
+        for cmd in tune:
+            self._handle_tune(cmd)
         now = time.monotonic()
         for key, (value, sent) in list(self._set_pending.items()):
             if now - sent > _PARAM_CALL_TIMEOUT_S:

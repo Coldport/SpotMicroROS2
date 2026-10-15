@@ -97,3 +97,16 @@ def test_track_topics():
     t = P.topics('robo')
     assert t['deck_track'] == 'robo/deck/track'
     assert t['track'] == 'robo/track'
+
+
+def test_decode_tune():
+    assert P.topics('robo')['deck_tune'] == 'robo/deck/tune'
+    assert P.decode_tune('{"cmd":"autotune_start","extra":1}') == {'cmd': 'autotune_start'}
+    assert P.decode_tune('{"cmd":"servo_select","leg":"RR","joint":"knee"}') == \
+        {'cmd': 'servo_select', 'leg': 'RR', 'joint': 'knee'}
+    assert P.decode_tune('{"cmd":"servo_jog","delta":-1}') == {'cmd': 'servo_jog', 'delta': -1.0}
+    assert P.decode_tune('{"cmd":"servo_record","actual":93.5}') == {'cmd': 'servo_record', 'actual': 93.5}
+    for bad in ('{"cmd":"servo_select","leg":"XX","joint":"hip"}', '{"cmd":"servo_jog","delta":true}',
+                '{"cmd":"servo_jog","delta":90}', '{"cmd":"servo_record"}', '{"cmd":"dance"}', 'nope'):
+        with pytest.raises(P.ProtocolError):
+            P.decode_tune(bad)

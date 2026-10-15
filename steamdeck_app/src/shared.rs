@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::protocol::{MapData, ScanData};
 
-/// Main-display views, in the order L2 cycles through them.
+/// Main-display views, in the order R2 cycles through them (L2 goes back).
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum View {
     Color,
@@ -24,6 +24,14 @@ impl View {
             View::Depth => View::Lidar,
             View::Lidar => View::Map,
             View::Map => View::Color,
+        }
+    }
+    pub fn prev(self) -> View {
+        match self {
+            View::Color => View::Map,
+            View::Depth => View::Color,
+            View::Lidar => View::Depth,
+            View::Map => View::Lidar,
         }
     }
     /// Name used on the wire (deck/view topic).
@@ -180,7 +188,114 @@ pub struct NavStatus {
     #[serde(default)]
     pub speed_mps: Option<f32>,
 }
-/// gait_node's mode: "walk" | "sentry" | "calibrate" | "trick" | "imu_calib" | "auto_nav".
+/// One test of an autotune run (gait_node autotune.py _seg_summary).
+#[derive(Deserialize, Clone, Default, Debug)]
+pub struct TuneSegment {
+    pub name: String,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub skipped: bool,
+    /// Distance the gait's odometry thinks it walked / the lidar measured (m).
+    #[serde(default)]
+    pub est_m: Option<f32>,
+    #[serde(default)]
+    pub real_m: Option<f32>,
+    #[serde(default)]
+    pub yaw_deg: Option<f32>,
+    #[serde(default)]
+    pub time_s: Option<f32>,
+}
+/// A parameter autotune changed (already live on the robot).
+#[derive(Deserialize, Clone, Default, Debug)]
+pub struct TuneChange {
+    pub key: String,
+    #[serde(default)]
+    pub old: serde_json::Value,
+    #[serde(default)]
+    pub new: serde_json::Value,
+    #[serde(default)]
+    pub why: String,
+}
+/// The current / last autotune run: state "running" | "done" | "failed" | "stopped".
+#[derive(Deserialize, Clone, Default, Debug)]
+pub struct TuneReport {
+    pub state: String,
+    /// Test running now (autotune.py COURSE name).
+    #[serde(default)]
+    pub test: String,
+    /// 1-based position in the course (autotune.py COURSE).
+    #[serde(default)]
+    pub step: u32,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub progress: f32,
+    #[serde(default)]
+    pub segments: Vec<TuneSegment>,
+    #[serde(default)]
+    pub changes: Vec<TuneChange>,
+    #[serde(default)]
+    pub findings: Vec<String>,
+    /// "" | "kept" | "reverted"
+    #[serde(default)]
+    pub outcome: String,
+}
+impl TuneReport {
+    pub fn running(&self) -> bool {
+        self.state == "running"
+    }
+    /// Finished with changes nobody has kept or reverted yet.
+    pub fn undecided(&self) -> bool {
+        !self.running() && self.outcome.is_empty() && !self.changes.is_empty()
+    }
+}
+#[derive(Deserialize, Clone, Default, Debug)]
+pub struct ServoPoint {
+    /// Angle written to the servo, and the joint's real angle (deg) at it.
+    pub servo: f32,
+    pub actual: f32,
+}
+#[derive(Deserialize, Clone, Default, Debug)]
+pub struct ServoFit {
+    #[serde(default)]
+    pub offset: Option<f32>,
+    #[serde(default)]
+    pub scale: Option<f32>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+/// Two-point servo calibration (mode "servo_cal"). Angles are the joint's real
+/// angle (the same for left and right legs): hip 90 = straight down, thigh 0 =
+/// straight down, knee = inside angle (180 = straight).
+#[derive(Deserialize, Clone, Default, Debug)]
+pub struct ServoCalInfo {
+    pub leg: String,
+    pub joint: String,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub unsaved: bool,
+    /// leg -> [hip, thigh, knee] of [offset, scale]
+    #[serde(default)]
+    pub cal: HashMap<String, [[f32; 2]; 3]>,
+    #[serde(default)]
+    pub points: Vec<ServoPoint>,
+    /// "FL hip" etc.: joints with two points recorded.
+    #[serde(default)]
+    pub done: Vec<String>,
+    /// Test angle the joint is sent to, and what the servo gets for it now.
+    #[serde(default)]
+    pub target: Option<f32>,
+    #[serde(default)]
+    pub servo: Option<f32>,
+    #[serde(default)]
+    pub moving: bool,
+    #[serde(default)]
+    pub fit: Option<ServoFit>,
+}
+/// gait_node's mode: "walk" | "sentry" | "calibrate" | "trick" | "imu_calib" | "auto_nav"
+/// | "autotune" | "servo_cal".
 #[derive(Deserialize, Clone, Default, Debug)]
 pub struct ModeInfo {
     pub mode: String,
@@ -201,6 +316,11 @@ pub struct ModeInfo {
     /// sentry: the body is following a tracked object (not the sticks).
     #[serde(default)]
     pub tracking: bool,
+    /// The running or last autotune run (in any mode, until cleared).
+    #[serde(default)]
+    pub tune: Option<TuneReport>,
+    #[serde(default)]
+    pub servo_cal: Option<ServoCalInfo>,
 }
 /// Sentry object tracking status from the robot's track_node (<p>/track).
 #[derive(Deserialize, Clone, Default, Debug)]
@@ -258,7 +378,7 @@ pub struct RobotState {
 }
 
 /// One live-tunable robot setting, as the robot describes it on the settings
-/// topic (spot_micro_deck/settings.py). The menu is built from these alone.
+/// topic (spot_micro_deck/settings.py), plus the app's own rows (menu::with_local_items).
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct SettingItem {
     pub key: String,
@@ -425,6 +545,34 @@ mod tests {
         assert_eq!((c.target, c.angle, c.servo), (Some(95.0), Some(93.5), Some(94.5)));
         let st: RobotState = serde_json::from_str(r#"{"mode":{"mode":"sentry","pose":{"roll":0,"pitch":1,"yaw":2},"tracking":true}}"#).unwrap();
         assert!(st.mode.unwrap().tracking);
+    }
+
+    #[test]
+    fn parses_tune_report_and_servo_cal() {
+        let st: RobotState = serde_json::from_str(
+            r#"{"mode":{"mode":"walk","tune":{"state":"done","test":"","step":8,"steps":8,"prompt":"Done",
+            "progress":1.0,"segments":[{"name":"forward","label":"Walk forward","note":"","est_m":1.0,"real_m":0.71,
+            "source":"lidar","yaw_deg":-3.2,"time_s":24.1,"roll_rms":2.9,"pitch_rms":1.1,"peak_tilt":7.0},
+            {"name":"left","label":"Steps left","skipped":true,"note":"skipped: no room"}],
+            "changes":[{"key":"odom_scale","old":1.0,"new":0.71,"why":"w"}],"findings":["Veered 3 deg"],"outcome":""}}}"#,
+        )
+        .unwrap();
+        let t = st.mode.unwrap().tune.unwrap();
+        assert!(t.undecided() && !t.running());
+        assert_eq!(t.segments[0].real_m, Some(0.71));
+        assert!(t.segments[1].skipped);
+        assert_eq!(t.changes[0].new, serde_json::json!(0.71));
+
+        let st: RobotState = serde_json::from_str(
+            r#"{"mode":{"mode":"servo_cal","servo_cal":{"leg":"RR","joint":"knee","note":"point 1 recorded",
+            "unsaved":true,"cal":{"FL":[[-1,1],[30,1],[10,1.05]]},"points":[{"servo":123.5,"actual":58.0}],
+            "done":["FL hip"],"target":60.0,"angle":60.0,"servo":125.0,"moving":false,"fit":{"offset":3.5,"scale":1.0}}}}"#,
+        )
+        .unwrap();
+        let c = st.mode.unwrap().servo_cal.unwrap();
+        assert_eq!(c.cal["FL"][2], [10.0, 1.05]);
+        assert_eq!(c.points[0].actual, 58.0);
+        assert_eq!(c.fit.unwrap().offset, Some(3.5));
     }
 
     #[test]
