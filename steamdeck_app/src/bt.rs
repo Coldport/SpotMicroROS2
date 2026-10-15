@@ -6,7 +6,8 @@
 //! Steps (on a background thread; progress goes into `Provision`):
 //!   1. find the robot by Bluetooth name (paired devices first, else a scan)
 //!   2. pair + trust it if needed ("just works" — no PIN)
-//!   3. connect RFCOMM and read its hello (its current Wi-Fi + IP)
+//!   3. open the link with an SDP channel (see sdp_link), then connect RFCOMM
+//!      and read its hello (its current Wi-Fi + IP)
 //!   4. same network as the Deck already? just use the IP it reported.
 //!      Otherwise send the Deck's Wi-Fi SSID + password (from NetworkManager,
 //!      or ~/.config/spotmicro-deck/wifi: SSID on line 1, password on line 2)
@@ -15,7 +16,7 @@
 //! Uses bluetoothctl / nmcli (both on SteamOS) and a raw RFCOMM socket.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::fd::FromRawFd;
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -114,7 +115,8 @@ fn run(p: &ProvisionRef) -> Result<String, String> {
     }
 
     step(p, format!("Connecting to {ROBOT_NAME}…"));
-    let stream = rfcomm_connect(&mac, RFCOMM_CHANNEL)?;
+    // Held open until we're done: it carries the Bluetooth link (see sdp_link).
+    let (_sdp, stream) = connect_with_retries(&mac)?;
     stream.set_read_timeout(Some(Duration::from_secs(15))).map_err(|e| e.to_string())?;
     let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(stream);
@@ -292,6 +294,78 @@ fn parse_mac(mac: &str) -> Option<[u8; 6]> {
     Some(out)
 }
 
+const BTPROTO_L2CAP: libc::c_int = 0;
+const SDP_PSM: u16 = 1;
+
+#[repr(C)]
+struct SockaddrL2 {
+    l2_family: libc::sa_family_t,
+    l2_psm: u16, // little endian
+    l2_bdaddr: [u8; 6],
+    l2_cid: u16,
+    l2_bdaddr_type: u8,
+}
+
+/// The robot's RFCOMM channel, a few tries: the first page after a while
+/// sometimes goes unheard while the robot's radio is busy with Wi-Fi.
+fn connect_with_retries(mac: &str) -> Result<(OwnedFd, UnixStream), String> {
+    let mut last = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            thread::sleep(Duration::from_secs(2));
+        }
+        let sdp = match sdp_link(mac) {
+            Ok(fd) => fd,
+            Err(e) => {
+                last = e;
+                continue;
+            }
+        };
+        match rfcomm_connect(mac, RFCOMM_CHANNEL) {
+            Ok(stream) => return Ok((sdp, stream)),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// Opens the Bluetooth link with an SDP channel before RFCOMM uses it.
+/// Opening RFCOMM first leaves the Deck's kernel (SteamOS 3.8, kernel 6.18)
+/// stuck half-connected: the robot asks for the Deck's name as the link comes
+/// up, the name arrives before the remote features, and the kernel then waits
+/// forever to start authentication, until the robot drops the idle link after
+/// 4 s ("Connection reset by peer"). SDP needs no authentication, so the link
+/// finishes coming up, and RFCOMM then authenticates on it the normal way.
+fn sdp_link(mac: &str) -> Result<OwnedFd, String> {
+    let bdaddr = parse_mac(mac).ok_or_else(|| format!("bad Bluetooth address {mac}"))?;
+    let addr = SockaddrL2 {
+        l2_family: libc::AF_BLUETOOTH as libc::sa_family_t,
+        l2_psm: SDP_PSM.to_le(),
+        l2_bdaddr: bdaddr,
+        l2_cid: 0,
+        l2_bdaddr_type: 0, // BR/EDR
+    };
+    // SAFETY: plain socket()/connect() on an fd we own; on success it is
+    // wrapped in OwnedFd, which closes it on drop.
+    unsafe {
+        let fd = libc::socket(libc::AF_BLUETOOTH, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, BTPROTO_L2CAP);
+        if fd < 0 {
+            return Err(format!("Bluetooth socket: {}", std::io::Error::last_os_error()));
+        }
+        let rc = libc::connect(
+            fd,
+            &addr as *const SockaddrL2 as *const libc::sockaddr,
+            std::mem::size_of::<SockaddrL2>() as libc::socklen_t,
+        );
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(format!("couldn't reach {ROBOT_NAME} over Bluetooth ({err}). Is it on and nearby?"));
+        }
+        Ok(OwnedFd::from_raw_fd(fd))
+    }
+}
+
 fn rfcomm_connect(mac: &str, channel: u8) -> Result<UnixStream, String> {
     let bdaddr = parse_mac(mac).ok_or_else(|| format!("bad Bluetooth address {mac}"))?;
     let addr = SockaddrRc { rc_family: libc::AF_BLUETOOTH as libc::sa_family_t, rc_bdaddr: bdaddr, rc_channel: channel };
@@ -343,7 +417,8 @@ mod tests {
     }
 
     #[test]
-    fn sockaddr_rc_matches_the_kernel_layout() {
+    fn sockaddrs_match_the_kernel_layout() {
         assert_eq!(std::mem::size_of::<SockaddrRc>(), 10);
+        assert_eq!(std::mem::size_of::<SockaddrL2>(), 14);
     }
 }

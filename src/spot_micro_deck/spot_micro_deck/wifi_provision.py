@@ -42,6 +42,7 @@ import os
 import re
 import select
 import socket
+import struct
 import subprocess
 import threading
 import time
@@ -166,6 +167,41 @@ def join_network(iface, ssid, psk, progress):
     except (OSError, RuntimeError) as exc:
         why += f'; restoring also failed: {exc}'
     return False, None, why
+
+
+# ── Bluetooth scan windows (raw HCI) ─────────────────────────────────────────
+
+# Listen for the Deck half the time (320 ms of every 640 ms). BlueZ's default is
+# 11.25 ms every 1.28 s (page) / 2.56 s (inquiry), and the Pi shares its radio
+# with Wi-Fi, so the Deck's connection attempts mostly went unheard ("Host is
+# down") and its scans didn't find the robot. setup.sh sets the page scan in
+# /etc/bluetooth/main.conf too; the inquiry scan only sticks when written here.
+SCAN_INTERVAL = 1024        # slots of 0.625 ms
+SCAN_WINDOW = 512
+_HCI_WRITE_PAGE_SCAN_ACTIVITY = 0x0C1C
+_HCI_WRITE_INQUIRY_SCAN_ACTIVITY = 0x0C1E
+
+
+def hci_command(opcode, params):
+    """An HCI command packet (type 0x01, little-endian opcode, length, params)."""
+    return struct.pack('<BHB', 1, opcode, len(params)) + params
+
+
+def widen_scan(dev=0, log=None):
+    """Set the page + inquiry scan windows on hci`dev` (needs root)."""
+    activity = struct.pack('<HH', SCAN_INTERVAL, SCAN_WINDOW)
+    try:
+        s = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_RAW,  # pylint: disable=no-member
+                          socket.BTPROTO_HCI)  # pylint: disable=no-member
+        try:
+            s.bind((dev,))
+            for op in (_HCI_WRITE_PAGE_SCAN_ACTIVITY, _HCI_WRITE_INQUIRY_SCAN_ACTIVITY):
+                s.send(hci_command(op, activity))
+        finally:
+            s.close()
+    except OSError as exc:
+        if log:
+            log(f'Could not set the Bluetooth scan windows: {exc}')
 
 
 # ── Bluetooth agent (bluetoothctl) ───────────────────────────────────────────
@@ -298,11 +334,18 @@ def main():
     srv.settimeout(5.0)
     log(f'Wi-Fi provisioning: "{args.name}", RFCOMM channel {args.channel}, iface {args.iface}')
     started = time.monotonic()
+    widened_at = None
     try:
         while True:
             agent.ensure_running()
             ssid, _ = wifi_status(args.iface)
+            was = agent.discoverable
             agent.set_discoverable(time.monotonic() - started < args.open_window or ssid is None)
+            # Again whenever discoverable changes (BlueZ rewrites the scan settings
+            # then) and once a minute in case anything else reset them.
+            if agent.discoverable != was or widened_at is None or time.monotonic() - widened_at > 60.0:
+                widen_scan(log=log)
+                widened_at = time.monotonic()
             try:
                 conn, addr = srv.accept()
             except socket.timeout:
@@ -310,6 +353,9 @@ def main():
             log(f'Deck connected from {addr[0]}')
             try:
                 handle_client(conn, args, log)
+            except ConnectionResetError:
+                # Normal when it only wanted our IP (already on the same Wi-Fi).
+                log('Deck disconnected')
             except OSError as exc:
                 log(f'Connection error: {exc}')
             finally:

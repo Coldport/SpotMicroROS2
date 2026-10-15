@@ -30,7 +30,7 @@
       step_length: 60.0       # mm max fore/aft stride at full stick (±50; FL thigh clamps at 0° past ~55)
       step_lateral: 25.0      # mm max lateral stride at full stick (was 500 — threw the legs out of reach)
       turn_gain: 60.0         # mm of arc each foot sweeps per half stride at full turn stick (feet now follow a circle)
-      max_foot_offset: 70.0   # mm hard clamp on each foot's horizontal stride offset (stride + turn combined)
+      max_foot_offset: 75.0   # mm hard clamp on each foot's horizontal stride offset (stride + turn combined)
       speed_scale: 0.8        # multiplies stick input -> stride (0.5 halved step_length to ±20mm: no net motion)
       gait_freq: 0.45          # step cycles per second (was 0.50; slowed so the longer shift_frac doesn't shorten the swing)
       gait_type: "crawl8"     # "crawl" = one leg lifted at a time (RL, FL, RR, FR); "trot" = diagonal pairs;
@@ -67,7 +67,7 @@
       stance_x_front: 5.0     # +50 = feet 5cm back (was 0.0, before that -50.0)
       stance_x_rear: 40.0     # +50 = feet 5cm back (was 0.0)
       stance_y: 15.0          # all feet this far outward
-      settle_speed: 70.0      # mm/s max foot speed when returning to stand (slow leg descent on stop)
+      settle_speed: 60.0      # mm/s max foot speed when returning to stand (slow leg descent on stop)
       # Static per-leg foot trim, [x, y, z] mm, added to every command for that leg.
       #   x: same sign as stance_x_* above (tune by eye: nudge 5mm, check the direction)
       #   y: + = foot further outward from the body

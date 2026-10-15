@@ -1,7 +1,7 @@
 import yaml
 
-from spot_micro_deck.wifi_provision import (netplan_with_network, netplan_without_network,
-                                             valid_credentials)
+from spot_micro_deck.wifi_provision import (hci_command, netplan_with_network,
+                                             netplan_without_network, valid_credentials)
 
 
 def test_adds_a_network_to_an_empty_file():
@@ -40,3 +40,9 @@ def test_credential_checks():
     assert valid_credentials('', 'password1')
     assert valid_credentials('x' * 33, 'password1')
     assert valid_credentials(None, 'password1')
+
+
+def test_hci_write_page_scan_activity_packet():
+    # type 0x01, opcode 0x0C1C little-endian, 4 param bytes: interval 1024, window 512
+    assert hci_command(0x0C1C, bytes([0x00, 0x04, 0x00, 0x02])) == bytes(
+        [0x01, 0x1C, 0x0C, 0x04, 0x00, 0x04, 0x00, 0x02])

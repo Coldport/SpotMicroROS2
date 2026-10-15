@@ -69,6 +69,8 @@ struct Args {
     quit_after: Option<f32>,
     /// Fake robot in auto nav mode (no connection): for screenshots of the nav view.
     demo_nav: bool,
+    /// Start Wi-Fi setup over Bluetooth at launch (testing / troubleshooting).
+    bt_setup: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -103,6 +105,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--selftest" => a.selftest = Some(value("--selftest")?),
             "--demo-nav" => a.demo_nav = true,
+            "--bt-setup" => a.bt_setup = true,
             "--quit-after" => a.quit_after = Some(value("--quit-after")?.parse().map_err(|_| "bad --quit-after")?),
             "-h" | "--help" => {
                 println!(
@@ -152,10 +155,8 @@ fn save_screenshot(canvas: &Canvas<Window>, path: &str) -> Result<(), String> {
         .map_err(|e| format!("{path}: {e}"))
 }
 
-/// Remember `host` (~/.config/spotmicro-deck/host) and re-exec this app with
-/// `--host host`, so every thread reconnects to it from scratch.
-fn restart_with_host(host: &str) -> Result<(), String> {
-    use std::os::unix::process::CommandExt;
+/// Remember `host` in ~/.config/spotmicro-deck/host for the next launch.
+fn save_host(host: &str) {
     if let Some(dir) = std::env::var("XDG_CONFIG_HOME")
         .ok()
         .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.config")))
@@ -165,19 +166,16 @@ fn restart_with_host(host: &str) -> Result<(), String> {
             eprintln!("couldn't save the robot address in {dir}/host: {e}");
         }
     }
-    let mut args: Vec<String> = Vec::new();
-    let mut it = std::env::args().skip(1);
-    while let Some(a) = it.next() {
-        if a == "--host" {
-            it.next();
-        } else {
-            args.push(a);
-        }
-    }
-    args.extend(["--host".to_string(), host.to_string()]);
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    println!("restarting on {host}");
-    Err(format!("restart failed: {}", std::process::Command::new(exe).args(args).exec()))
+}
+
+/// Held for the app's lifetime: a second copy (e.g. Steam launching it again)
+/// exits instead of fighting this one for the MQTT client ID. An abstract
+/// socket, so nothing is left behind if the app crashes.
+fn single_instance() -> Result<std::os::unix::net::UnixListener, String> {
+    use std::os::linux::net::SocketAddrExt;
+    let addr = std::os::unix::net::SocketAddr::from_abstract_name(b"spotmicro-deck").map_err(|e| e.to_string())?;
+    std::os::unix::net::UnixListener::bind_addr(&addr)
+        .map_err(|_| "the app is already running".to_string())
 }
 
 fn axis_event(axis: Axis, value: i16) -> Event {
@@ -202,7 +200,11 @@ fn run() -> Result<(), String> {
     let (host, port) = split_host(&spec, args.port.unwrap_or(1883));
     // The demo must not talk to a real robot.
     let (host, port) = if args.demo_nav { ("127.0.0.1".to_string(), 9) } else { (host, port) };
-    let host_label = format!("{host}:{port}");
+    let mut host_label = format!("{host}:{port}");
+
+    // Screenshot / test runs (headless) may run beside the real app.
+    let headless = matches!(std::env::var("SDL_VIDEODRIVER").as_deref(), Ok("dummy") | Ok("offscreen"));
+    let _instance = if headless { None } else { Some(single_instance()?) };
 
     // Steam Input can deliver events while another window (Steam's overlay) has focus.
     sdl2::hint::set("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
@@ -213,7 +215,6 @@ fn run() -> Result<(), String> {
     let mut pump = sdl.event_pump()?;
     sdl.mouse().show_cursor(false);
 
-    let headless = matches!(std::env::var("SDL_VIDEODRIVER").as_deref(), Ok("dummy") | Ok("offscreen"));
     let mut wb = video.window("SpotMicro", LOGICAL_W, LOGICAL_H);
     wb.position_centered().resizable();
     if !args.windowed && !headless {
@@ -247,6 +248,9 @@ fn run() -> Result<(), String> {
     );
 
     let provision: bt::ProvisionRef = Arc::new(Mutex::new(bt::Provision::default()));
+    if args.bt_setup {
+        bt::start(&provision);
+    }
     let mut pad = Gamepad::default();
     let mut controllers: Vec<GameController> = Vec::new();
     for i in 0..game_controller.num_joysticks().unwrap_or(0) {
@@ -530,6 +534,8 @@ fn run() -> Result<(), String> {
                 if key == menu::BT_WIFI_KEY {
                     bt::start(&provision);
                     menu.open = false;
+                } else if key == menu::EXIT_KEY {
+                    break 'main;
                 } else if !commander.set(&key, &value) {
                     menu.notify("Not connected — change not sent".into(), false);
                 }
@@ -668,16 +674,18 @@ fn run() -> Result<(), String> {
                 provision: provision.lock().unwrap().clone(),
             }
         };
-        // Bluetooth setup found the robot's address: save it and restart on it —
+        // Bluetooth setup found the robot's address: save it and reconnect to it —
         // unless we're connected and the robot didn't change networks (nothing to do).
         if let Some(ip) = snap.provision.host.clone().filter(|_| !snap.provision.running) {
+            provision.lock().unwrap().host = None;
             if snap.broker_connected && !snap.provision.moved {
-                provision.lock().unwrap().host = None;
                 menu.notify(format!("Robot is on the Deck's Wi-Fi ({ip}) — already connected"), true);
-            } else if format!("{ip}:{port}") != host_label {
-                ui.render(&mut canvas, &tc, &snap, &menu);
-                canvas.present();
-                restart_with_host(&ip)?;
+            } else {
+                save_host(&ip);
+                commander.set_host(&ip);
+                host_label = format!("{ip}:{port}");
+                println!("reconnecting to {host_label}");
+                menu.notify(format!("Connecting to the robot at {ip}"), true);
             }
         }
         depth_ok = snap.depth_available();
