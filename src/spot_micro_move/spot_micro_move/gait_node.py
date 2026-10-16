@@ -115,6 +115,16 @@ SETTLE: when the sticks centre, feet don't snap to the stand pose — each foot
 moves toward it at no more than `settle_speed` mm/s, so a leg that was up
 mid-swing comes down gently.
 
+SOFT LANDING: `soft_landing` replaces the symmetric swing (sin^2 lift) with one
+that rises in the first `swing_peak` of the swing, drops quickly to
+`landing_zone` mm above the floor, then covers that last stretch slowing evenly
+from `landing_speed` mm/s to 0, so a floor that is higher than planned (the body
+sags on three legs) is met gently. Fore/aft finishes as the landing starts, so
+the foot comes straight down. A high step in a short swing leaves less time to
+land: the drop is held to ~1 m/s average, so the landing may come in faster than
+`landing_speed` asks (lower `step_height` or `gait_freq` to give it room). See
+swing.py.
+
 LEVELING: body roll/pitch from the IMU (`imu_topic`, BNO055 fused orientation)
 is integrated into per-leg height offsets (front vs rear for pitch, left vs
 right for roll) so the body stays level. Mount orientation is handled by
@@ -263,7 +273,7 @@ from spot_micro_ik import Dog, load_calibration
 from spot_micro_ik.calibration import JOINTS, fit_joint, save_offsets, with_cal, with_offset
 from spot_micro_ik.dog import DEFAULT_STAND_POSE
 from spot_micro_ik.leg import RIGHT_LEGS
-from spot_micro_move import autotune, scan_match, tricks
+from spot_micro_move import autotune, scan_match, swing, tricks
 
 _AX = {name: i for i, name in enumerate(AXIS_NAMES)}
 _BTN = {name: i for i, name in enumerate(BUTTON_NAMES)}
@@ -297,7 +307,8 @@ IMU_CAL_HOLD_S = 1.0         # ... and held still this long (level: 1.5 s)
 # timing, control/PWM rates, calibration — are only read at startup.
 LIVE_PARAMS = frozenset([
     'height_rate', 'z_min', 'z_max', 'speed_scale', 'stick_deadzone',
-    'stand_z', 'step_height', 'step_length', 'step_lateral', 'turn_gain', 'max_foot_offset',
+    'stand_z', 'step_height', 'soft_landing', 'swing_peak', 'landing_zone', 'landing_speed',
+    'step_length', 'step_lateral', 'turn_gain', 'max_foot_offset',
     'gait_freq', 'gait_type', 'shift_frac', 'shift_overlap',
     'balance_enabled', 'balance_gain_lateral', 'balance_gain_fore_aft', 'balance_max_shift',
     'crawl8_shift_fwd', 'crawl8_shift_back', 'crawl8_shift_side',
@@ -372,6 +383,10 @@ class GaitNode(Node):
 
         self.declare_parameter('stand_z', DEFAULT_STAND_POSE['z'])
         self.declare_parameter('step_height', 30.0)     # mm foot lift during swing
+        self.declare_parameter('soft_landing', False)   # shaped swing: slow final touchdown (SOFT LANDING)
+        self.declare_parameter('swing_peak', 0.35)      # share of the swing spent rising (soft_landing)
+        self.declare_parameter('landing_zone', 20.0)    # mm above the floor where the slow landing starts
+        self.declare_parameter('landing_speed', 250.0)  # mm/s entering that zone, easing to 0 at touchdown
         self.declare_parameter('step_length', 40.0)      # mm max fore/aft stride
         self.declare_parameter('step_lateral', 20.0)      # mm max lateral stride
         self.declare_parameter('turn_gain', 25.0)         # mm of arc per foot per half stride at full turn stick
@@ -686,6 +701,10 @@ class GaitNode(Node):
             self._z = self._stand_z      # new standing height takes over from R1/L1
         self._z = min(max(self._z, self._z_min), self._z_max)   # live body height (R1/L1)
         self._step_height = float(p('step_height').value)
+        self._soft_landing = bool(p('soft_landing').value)
+        self._swing_peak = min(max(float(p('swing_peak').value), 0.1), 0.9)
+        self._landing_zone = max(float(p('landing_zone').value), 0.0)
+        self._landing_speed = max(float(p('landing_speed').value), 1.0)
         self._step_length = float(p('step_length').value)
         self._step_lateral = float(p('step_lateral').value)
         self._turn_gain = float(p('turn_gain').value)
@@ -793,6 +812,10 @@ class GaitNode(Node):
                 if self._t > 0.0:
                     return SetParametersResult(successful=False,
                                                reason='stop walking before changing the sway')
+            if name == 'soft_landing' and self._t > 0.0 and bool(value) != self._soft_landing:
+                # the two swing shapes differ by tens of mm mid-swing
+                return SetParametersResult(successful=False,
+                                           reason='stop walking before switching soft landing')
             if name.startswith('trim_') and len(value) != 3:
                 return SetParametersResult(successful=False, reason=f'{name} must be [x, y, z]')
             if name == 'gait_freq' and value <= 0.0:
@@ -1388,11 +1411,15 @@ class GaitNode(Node):
 
             if self._swing_start <= local < self._slot_frac:
                 sw = (local - self._swing_start) / swing_len   # 0..1 across the swing
-                # Eased so the foot leaves and lands with zero velocity (soft
-                # lift-off and touchdown): cosine ease fore/aft, sin^2 lift.
-                ease = 0.5 - 0.5 * math.cos(math.pi * sw)
+                # Eased so the foot leaves and lands with zero velocity: cosine
+                # ease fore/aft, sin^2 lift, or the shaped soft-landing swing.
+                if self._soft_landing:
+                    lift, ease = swing.soft_swing(
+                        sw, swing_len * period, self._step_height, self._swing_peak,
+                        self._landing_zone, self._landing_speed)
+                else:
+                    lift, ease = swing.classic_swing(sw)
                 s = 2.0 * ease - 1.0                           # -1 -> +1
-                lift = math.sin(math.pi * sw) ** 2
                 dz = -self._step_height * lift                 # lift (shorten the leg)
                 self._stable = False
                 # A raised foot takes little of the fast tilt correction, so the

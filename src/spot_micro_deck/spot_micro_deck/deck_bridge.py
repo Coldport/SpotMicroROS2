@@ -102,6 +102,11 @@ _CAMERA_CHECK_S = 2.0
 # doesn't restart the camera each time. A RealSense stream restart can take seconds.
 _CAMERA_OFF_DELAY_S = 1.5
 _CAMERA_CALL_TIMEOUT_S = 10.0
+_CAMERA_RETRY_S = 3.0         # after a failed on/off call (e.g. the driver is mid-restart)
+# The RealSense driver restarts its sensor after each enable_* change (~1 s on
+# the D405) and deadlocks if another one arrives meanwhile, so they go one per
+# request with this gap between them.
+_REALSENSE_STEP_GAP_S = 2.0
 _SETTINGS_PERIOD_S = 1.0
 _SAVE_DELAY_S = 1.5          # write params files once the D-pad has been still this long
 # A parameter-service reply that hasn't come back by then is treated as lost. The
@@ -238,6 +243,7 @@ class DeckBridge(Node):
         self._realsense_params = AsyncParameterClient(self, p('realsense_node').value)
         self._camera_on = True         # the drivers start capturing
         self._camera_call = None       # monotonic time of the outstanding on/off call, or None
+        self._camera_retry_at = 0.0    # no on/off call before this (monotonic), after a failure
         self._map_view_since = None
 
         # Settings: gait_node's are read/written through its parameter services.
@@ -535,13 +541,19 @@ class DeckBridge(Node):
             if now - self._camera_call < _CAMERA_CALL_TIMEOUT_S:
                 return
             self._camera_call = None       # lost reply: try again
+        if now < self._camera_retry_at:
+            return
         # Our own color subscription is already gone in the map view, so any
         # subscriber left is someone else (track_node following a target, a viewer).
         want_on = not (self._camera_off_in_map and map_view
                        and now - self._map_view_since >= _CAMERA_OFF_DELAY_S
                        and self.count_subscribers(self._color_topic()) == 0)
         kind = self._camera['type']
-        if want_on == self._camera_on or not self._camera['streaming']:
+        # Only turning it off needs a running stream. The RealSense driver drops
+        # its publishers while its streams are disabled, so 'streaming' reads
+        # False the whole time it is off; the service checks below cover "is
+        # the driver there" for turning it back on.
+        if want_on == self._camera_on or (not want_on and not self._camera['streaming']):
             return
 
         def done(future):
@@ -554,6 +566,7 @@ class DeckBridge(Node):
             except Exception as exc:   # driver went away mid-call
                 ok, res = False, exc
             if not ok:
+                self._camera_retry_at = time.monotonic() + _CAMERA_RETRY_S
                 self.get_logger().warn(f'Turning the camera {"on" if want_on else "off"} '
                                        f'failed: {res}', throttle_duration_sec=10.0)
                 return
@@ -568,12 +581,30 @@ class DeckBridge(Node):
         elif kind == 'realsense':
             if not self._realsense_params.services_are_ready():
                 return
-            self._realsense_params.set_parameters(
-                [Parameter('enable_color', value=want_on),
-                 Parameter('enable_depth', value=want_on)], done)
+            self._set_realsense_streams(want_on, done)
         else:
             return
         self._camera_call = now
+
+    def _set_realsense_streams(self, on, done, names=('enable_color', 'enable_depth')):
+        """Switch the RealSense streams one at a time (see _REALSENSE_STEP_GAP_S);
+        done(future) gets the last reply, or the first one that failed."""
+        def answered(future):
+            try:
+                ok = all(r.successful for r in future.result().results)
+            except Exception:   # driver went away mid-call
+                ok = False
+            if not ok or len(names) == 1:
+                done(future)
+                return
+
+            def next_step():
+                timer.cancel()
+                self.destroy_timer(timer)
+                self._set_realsense_streams(on, done, names[1:])
+            timer = self.create_timer(_REALSENSE_STEP_GAP_S, next_step)
+
+        self._realsense_params.set_parameters([Parameter(names[0], value=on)], answered)
 
     def _reconcile_mic(self, active):
         """Run the mic while a Deck is online and wants it; restart it when the

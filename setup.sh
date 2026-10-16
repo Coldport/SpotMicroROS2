@@ -272,6 +272,25 @@ if [ -f "$WIFI_UNIT_SRC" ]; then
         echo "  after boot (and whenever its Wi-Fi is down)"
     fi
     rm -f "$RENDERED_UNIT"
+
+    # BlueZ's default page scan listens 11.25 ms every 1.28 s, and the Pi's
+    # radio shares that time with Wi-Fi, so the Deck's connection attempts
+    # mostly went unheard ("Host is down"). Listen half the time instead.
+    BT_CONF=/etc/bluetooth/main.conf
+    if [ -f "$BT_CONF" ] && ! grep -q "^PageScanWindow=512" "$BT_CONF"; then
+        log "Widening the robot's Bluetooth page/inquiry scan (so the Deck can connect)"
+        sudo sed -i \
+            -e 's/^#\?PageScanInterval=.*/PageScanInterval=1024/' \
+            -e 's/^#\?PageScanWindow=.*/PageScanWindow=512/' \
+            -e 's/^#\?InquiryScanInterval=.*/InquiryScanInterval=1024/' \
+            -e 's/^#\?InquiryScanWindow=.*/InquiryScanWindow=512/' \
+            "$BT_CONF"
+        sudo systemctl restart bluetooth.service spotmicro-wifi-provision.service
+        # The kernel only applies them when the adapter powers up.
+        sleep 2
+        bluetoothctl power off >/dev/null 2>&1 || true
+        bluetoothctl power on >/dev/null 2>&1 || true
+    fi
 fi
 
 WS_SOURCE_LINE="[ -f \"$REPO_DIR/install/setup.bash\" ] && source \"$REPO_DIR/install/setup.bash\"  # SpotMicroROS2 workspace"

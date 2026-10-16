@@ -54,6 +54,8 @@ pub type Change = (String, Value);
 pub const LOCAL_PREFIX: &str = "deck.";
 /// "Wi-Fi setup over Bluetooth": an A×2 action row, so it can't start by accident.
 pub const BT_WIFI_KEY: &str = "deck.bt_wifi";
+/// "Exit app": A×2 too, and also there with no link.
+pub const EXIT_KEY: &str = "deck.exit";
 
 /// The robot's settings plus the app's own Connection rows, which are there
 /// even with no link (that's when they're needed most).
@@ -66,6 +68,17 @@ pub fn with_local_items(robot: &[SettingItem]) -> Vec<SettingItem> {
         kind: "action".into(),
         help: "Finds the robot over Bluetooth and puts it on the Deck's Wi-Fi (or just learns its \
                address). Works whether or not the app is connected."
+            .into(),
+        available: true,
+        ..Default::default()
+    });
+    items.push(SettingItem {
+        key: EXIT_KEY.into(),
+        label: "Exit app".into(),
+        group: "App".into(),
+        kind: "action".into(),
+        help: "Closes the app and returns to Steam. The robot stays on, and stops moving as soon \
+               as the Deck disconnects."
             .into(),
         available: true,
         ..Default::default()
@@ -332,16 +345,20 @@ mod tests {
     }
 
     #[test]
-    fn bt_wifi_row_is_always_there_and_needs_two_presses() {
+    fn local_rows_are_always_there_and_need_two_presses() {
         let items = with_local_items(&[]);
         assert!(robot_items_missing(&items));
-        assert_eq!(items.len(), 1);
+        assert_eq!(items.len(), 2);
         let mut m = Menu::default();
         assert_eq!(m.confirm(&items), None, "first A only arms it");
         assert_eq!(m.confirm(&items), Some((BT_WIFI_KEY.to_string(), Value::Bool(true))));
+        m.navigate(Dir::Down, &items);
+        assert_eq!(m.confirm(&items), None, "first A only arms it");
+        assert_eq!(m.confirm(&items), Some((EXIT_KEY.to_string(), Value::Bool(true))));
         let with_robot = with_local_items(&[num("h", 40.0, 10.0, 90.0, 5.0)]);
         assert!(!robot_items_missing(&with_robot));
-        assert_eq!(with_robot.last().unwrap().key, BT_WIFI_KEY, "robot rows come first");
+        assert_eq!(with_robot[0].key, "h", "robot rows come first");
+        assert_eq!(with_robot.last().unwrap().key, EXIT_KEY, "Exit is the last row");
     }
 
     #[test]

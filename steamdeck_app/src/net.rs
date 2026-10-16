@@ -31,9 +31,19 @@ type FrameSlot = Arc<(Mutex<Option<(View, Vec<u8>)>>, Condvar)>;
 pub struct Commander {
     client: Client,
     topics: Arc<Topics>,
+    new_host: Arc<Mutex<Option<String>>>,
 }
 
 impl Commander {
+    /// Move to the robot at `host` (same port, prefix and login). The poll
+    /// thread drops the current connection and dials the new address. This
+    /// replaces re-exec'ing the app, which made Steam's Gaming Mode think the
+    /// app had quit and launch a second copy that fought this one for the
+    /// MQTT client ID.
+    pub fn set_host(&self, host: &str) {
+        *self.new_host.lock().unwrap() = Some(host.to_string());
+    }
+
     /// Ask the robot to change one setting; the reply arrives as a SettingAck.
     pub fn set(&self, key: &str, value: &serde_json::Value) -> bool {
         self.client
@@ -99,18 +109,10 @@ pub fn start(
 ) -> Commander {
     let topics = Arc::new(Topics::new(&cfg.prefix));
 
-    let mut opts = MqttOptions::new("spotmicro-deck", cfg.host.clone(), cfg.port);
-    opts.set_keep_alive(Duration::from_secs(5));
-    opts.set_clean_session(true);
-    // Video frames are tens of KB; rumqttc's default packet limit is 10 KB.
-    opts.set_max_packet_size(4 * 1024 * 1024, 256 * 1024);
-    opts.set_last_will(LastWill::new(&topics.deck_online, "0", QoS::AtLeastOnce, true));
-    if let (Some(u), Some(p)) = (&cfg.username, &cfg.password) {
-        opts.set_credentials(u.clone(), p.clone());
-    }
-    let (client, mut connection) = Client::new(opts, 256);
+    let (client, mut connection) = Client::new(mqtt_options(&cfg, &cfg.host, &topics), 256);
+    let new_host: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
-    let commander = Commander { client: client.clone(), topics: topics.clone() };
+    let commander = Commander { client: client.clone(), topics: topics.clone(), new_host: new_host.clone() };
     let slot: FrameSlot = Arc::new((Mutex::new(None), Condvar::new()));
     let subscribed_video: Arc<Mutex<Option<View>>> = Arc::new(Mutex::new(None));
 
@@ -181,7 +183,18 @@ pub fn start(
 
     // ── poll ─────────────────────────────────────────────────────────────────
     thread::spawn(move || {
-        for event in connection.iter() {
+        loop {
+            if let Some(host) = new_host.lock().unwrap().take() {
+                let ev = &mut connection.eventloop;
+                ev.mqtt_options = mqtt_options(&cfg, &host, &topics);
+                ev.clean(); // drop the connection; the next recv() dials `host`
+                ev.pending.clear(); // never replay input queued for the old address
+                let mut s = shared.lock().unwrap();
+                s.broker_connected = false;
+                s.robot_online = None;
+                s.last_error.clear();
+            }
+            let Ok(event) = connection.recv() else { break };
             match event {
                 Ok(Event::Incoming(Packet::ConnAck(_))) => {
                     {
@@ -212,12 +225,25 @@ pub fn start(
                         s.robot_online = None;
                         s.last_error = e.to_string();
                     }
-                    thread::sleep(Duration::from_secs(1)); // then iter() reconnects
+                    thread::sleep(Duration::from_secs(1)); // then recv() reconnects
                 }
             }
         }
     });
     commander
+}
+
+fn mqtt_options(cfg: &NetConfig, host: &str, topics: &Topics) -> MqttOptions {
+    let mut opts = MqttOptions::new("spotmicro-deck", host, cfg.port);
+    opts.set_keep_alive(Duration::from_secs(5));
+    opts.set_clean_session(true);
+    // Video frames are tens of KB; rumqttc's default packet limit is 10 KB.
+    opts.set_max_packet_size(4 * 1024 * 1024, 256 * 1024);
+    opts.set_last_will(LastWill::new(&topics.deck_online, "0", QoS::AtLeastOnce, true));
+    if let (Some(u), Some(p)) = (&cfg.username, &cfg.password) {
+        opts.set_credentials(u.clone(), p.clone());
+    }
+    opts
 }
 
 fn video_topic(topics: &Topics, view: View) -> String {
