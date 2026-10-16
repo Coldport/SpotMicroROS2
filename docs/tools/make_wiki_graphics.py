@@ -140,7 +140,7 @@ class Canvas:
 
 
 def geometry():
-    with open(os.path.join(ROOT, 'config', 'spot_micro_config.yaml')) as f:
+    with open(os.path.join(ROOT, 'config', 'spot_micro_config.yaml'), encoding='utf-8') as f:
         cfg = yaml.safe_load(f)['spot_micro']
     return cfg['kinematics'], cfg['visual']
 
@@ -215,7 +215,6 @@ def robot_side():
     imu = (pca[0] + pca[2] + 14, win[1] + win[3] / 2 - 18, 50, 36)
     c.rect(*imu, fill=(120, 60, 150), r=5)
     c.text(imu[0] + 25, imu[1] + 18, 'IMU', 12, True, TEXT, 'mm')
-    bat = (cx - half + 40, body_top + body_h - 18, 2 * half - 80, 12)
     # shoulder (hip) + thigh servos on the near legs
     for knee, foot, hip in knees:
         servo(c, hip[0], hip[1], size=22)
@@ -232,8 +231,8 @@ def robot_side():
     c.arrow((1330, 150), (1460, 150), fill=ACCENT, width=4, head=16)
     c.text(1330, 118, 'FRONT', 16, True, ACCENT)
 
-    knee_f, foot_f, hip_f = knees[0]
-    knee_r, foot_r, hip_r = knees[1]
+    knee_f, _, hip_f = knees[0]
+    knee_r, foot_r, _ = knees[1]
     c.callout(60, 290, 'RPLIDAR A2M12', ['360° scan, 10 Hz', '→ /scan → SLAM map'], (lx - 52, body_top - 45), ACCENT, elbow=True)
     c.callout(1180, 380, 'Camera (front)', ['RealSense D405 (colour + depth)', 'or any USB webcam'], (cam_x + 18, mid_y), ACCENT)
     c.callout(60, 140, 'Raspberry Pi 5', ['ROS 2 Jazzy, MQTT broker,', 'deck_bridge + gait_node'], (pi[0] + 20, pi[1] + 8), GOOD, elbow=True)
